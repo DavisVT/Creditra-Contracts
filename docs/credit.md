@@ -181,6 +181,27 @@ Returns the credit line data for a borrower, or `None` if not found. View functi
 
 ---
 
+## Error Codes
+
+The `Credit` contract uses standard `u32` discriminants for standardized error handling across the Rust and TypeScript SDK clients. Integrator clients can match these error codes to understand failure reasons.
+
+| Error Code | Variant | Description |
+|---|---|---|
+| `1` | `Unauthorized` | Caller is not authorized to perform this action. |
+| `2` | `NotAdmin` | Caller does not have admin privileges. |
+| `3` | `CreditLineNotFound` | The specified credit line was not found. |
+| `4` | `CreditLineClosed` | Action cannot be performed because the credit line is closed. |
+| `5` | `InvalidAmount` | The requested amount is invalid (e.g., zero or negative). |
+| `6` | `OverLimit` | The requested draw exceeds the available credit limit. |
+| `7` | `NegativeLimit` | The credit limit cannot be negative. |
+| `8` | `RateTooHigh` | The interest rate change exceeds the maximum allowed delta. |
+| `9` | `ScoreTooHigh` | The risk score is above the acceptable maximum threshold. |
+| `10` | `UtilizationNotZero` | Action cannot be performed because the credit line utilization is not zero. |
+| `11` | `Reentrancy` | Reentrancy detected during cross-contract calls. |
+| `12` | `Overflow` | Math overflow occurred during calculation. |
+
+---
+
 ## Events
 
 | Topic | Event Type Symbol | Emitted By | Description |
