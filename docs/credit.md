@@ -120,17 +120,49 @@ Emits: `("credit", "repay")` with `RepaymentEvent` (borrower, amount actually tr
 
 ---
 
-### `update_risk_parameters(env, borrower, interest_rate_bps, risk_score)`
-Update the risk parameters for an existing credit line. Called by admin or risk engine.
+### `update_risk_parameters(env, borrower, credit_limit, interest_rate_bps, risk_score)`
+Update the risk parameters for an existing credit line. Admin-only.
 
-When a `RateChangeConfig` is set:
-- The absolute delta between the current and new `interest_rate_bps` must be ≤ `max_rate_change_bps`.
-- If `last_rate_update_ts > 0`, the elapsed time since the last change must be ≥ `rate_change_min_interval`.
-- If the rate is unchanged, both checks are skipped.
+| Parameter | Type | Description |
+|---|---|---|
+| `borrower` | `Address` | Borrower whose credit line to update |
+| `credit_limit` | `i128` | New credit limit (must be ≥ current `utilized_amount`) |
+| `interest_rate_bps` | `u32` | New interest rate in basis points (0–10000) |
+| `risk_score` | `u32` | New risk score (0–100) |
 
-Panics with `"rate change exceeds maximum allowed delta"` or `"rate change too soon: minimum interval not elapsed"` on violation.
+#### Rate-change limits (optional, backward-compatible)
+When a `RateChangeConfig` has been set via `set_rate_change_limits`, the following
+checks are enforced **only when the interest rate is actually changing**:
 
----
+- The absolute delta `|new_rate - old_rate|` must be ≤ `max_rate_change_bps`.
+- If `last_rate_update_ts > 0` and `rate_change_min_interval > 0`, the elapsed
+  time since the last rate change must be ≥ `rate_change_min_interval`.
+- If the rate is **unchanged**, both checks are skipped entirely.
+- If **no config is set**, no limits are enforced (fully backward-compatible).
+
+On a successful rate change, `last_rate_update_ts` is updated to the current
+ledger timestamp.
+
+#### Errors
+| Condition | Panic message |
+|---|---|
+| Caller is not admin | Auth error |
+| Credit line not found | `ContractError::CreditLineNotFound` |
+| `credit_limit < utilized_amount` | `ContractError::OverLimit` |
+| `credit_limit < 0` | `ContractError::NegativeLimit` |
+| `interest_rate_bps > 10000` | `ContractError::RateTooHigh` |
+| `risk_score > 100` | `ContractError::ScoreTooHigh` |
+| Rate delta exceeds max | `"rate change exceeds maximum allowed delta"` |
+| Too soon since last change | `"rate change too soon: minimum interval not elapsed"` |
+
+Emits: `RiskParametersUpdatedEvent` with borrower, new credit limit, new rate, new score.
+
+#### Security notes
+- Rate-change config is optional and stored in instance storage.
+- Absence of config means **no limits** — fully backward-compatible.
+- `last_rate_update_ts = 0` (never updated) always bypasses the interval check,
+  so the first rate change is never blocked by the time window.
+- The delta check uses `abs_diff` which is symmetric and overflow-safe.
 
 ### `suspend_credit_line(env, borrower)`
 Suspends an active credit line. Called by admin.
