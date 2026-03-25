@@ -202,8 +202,58 @@ impl Credit {
                 risk_score,
             },
         );
+
+
+
+    /// Draw from credit line (borrower).
+ 
+    /// Errors with ContractError if credit line does not exist, is Closed, or borrower has not authorized.
+
+    /// Reverts if credit line does not exist, is Closed, borrower has not authorized,
+    /// or the provided borrower does not match the stored credit line owner.
+ 
+ 
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
+
+
+    /// Draw from credit line: verifies limit, updates utilized_amount,
+    /// and transfers the protocol token from the contract reserve to the borrower.
+    ///
+    /// # Panics
+    /// - `"Credit line not found"` – borrower has no open credit line
+    /// - `"credit line is closed"` – line is closed
+    /// - `"Credit line not active"` – line is suspended or defaulted
+    /// - `"exceeds credit limit"` – draw would push utilized_amount past credit_limit
+    /// - `"amount must be positive"` – amount is zero or negative
+    /// - `"reentrancy guard"` – re-entrant call detected
+
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
+ 
+
+    /// Draw from credit line (borrower).
+    /// Reverts if credit line does not exist, is Closed/Suspended, or borrower has not authorized.
+    /// Reverts if credit line does not exist, is Closed, or borrower has not authorized.
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
+        set_reentrancy_guard(&env);
+        borrower.require_auth();
+
     }
 
+
+
+    /// Update risk parameters for an existing credit line.
+    ///
+    /// Called by admin or risk engine when a borrower's risk profile changes.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address.
+    /// - `credit_limit`: New credit limit.
+    /// - `interest_rate_bps`: New interest rate in basis points.
+    /// - `risk_score`: New risk score.
+    ///
+    /// # Note
+    /// Not yet implemented. Planned logic: load existing record, update fields,
+    /// persist updated [`CreditLineData`].
     /// @notice Draws credit by transferring liquidity tokens to the borrower.
     /// @dev Enforces status/limit/liquidity checks and uses a reentrancy guard.
     pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
@@ -370,8 +420,42 @@ impl Credit {
         );
     }
 
-    /// Suspend a credit line (admin only).
-    /// Emits a CreditLineSuspended event.
+    /// Set rate-change limits (admin only).
+    ///
+    /// Configures the maximum allowed interest-rate change per call and the
+    /// minimum time interval between consecutive rate changes.
+    pub fn set_rate_change_limits(
+        env: Env,
+        max_rate_change_bps: u32,
+        rate_change_min_interval: u64,
+    ) {
+        require_admin_auth(&env);
+        let cfg = RateChangeConfig {
+            max_rate_change_bps,
+            rate_change_min_interval,
+        };
+        env.storage().instance().set(&rate_cfg_key(&env), &cfg);
+    }
+
+    /// Get the current rate-change limit configuration (view function).
+    pub fn get_rate_change_limits(env: Env) -> Option<RateChangeConfig> {
+        env.storage().instance().get(&rate_cfg_key(&env))
+    }
+
+    /// Suspend a credit line temporarily.
+    ///
+    /// Called by admin to freeze a borrower's credit line without closing it.
+    /// The credit line can be reactivated or closed after suspension.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address.
+    ///
+    /// # Panics
+    /// - If no credit line exists for the given borrower.
+    ///
+    /// # Events
+    /// Emits a `("credit", "suspend")` [`CreditLineEvent`].
+    /// Suspend a credit line temporarily (admin only).
     pub fn suspend_credit_line(env: Env, borrower: Address) {
         require_admin_auth(&env);
         let mut credit_line: CreditLineData = env
@@ -397,6 +481,7 @@ impl Credit {
         );
     }
 
+    /// Close a credit line. Callable by admin (force-close) or by borrower when utilization is zero.
     /// Close a credit line. Callable by admin (force-close) or by borrower when utilization is zero.
     /// Allowed from Active, Suspended, or Defaulted. Idempotent if already Closed.
     ///
@@ -449,7 +534,6 @@ impl Credit {
                 risk_score: credit_line.risk_score,
             },
         );
-    }
 
     /// Mark a credit line as defaulted (admin only).
     ///
@@ -480,7 +564,6 @@ impl Credit {
                 risk_score: credit_line.risk_score,
             },
         );
-    }
 
     /// Reinstate a defaulted credit line to Active (admin only).
     ///
@@ -527,10 +610,19 @@ impl Credit {
 
 #[cfg(test)]
 mod test {
+    soroban_sdk::contractimpl! { export! CreditImpl }
+
+    use soroban_sdk::contractclient::ContractClient;
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::testutils::Events;
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::token;
+    use soroban_sdk::contractclient::ContractClient;
+use soroban_sdk::testutils::Events;
     use soroban_sdk::token::StellarAssetClient;
+    use soroban_sdk::{Symbol, TryFromVal, TryIntoVal};
+
+    type CreditClient<'a> = soroban_sdk::contractclient::ContractClient<'a, CreditImpl>;
 
     fn setup_test(env: &Env) -> (Address, Address, Address) {
         env.mock_all_auths();
