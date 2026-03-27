@@ -1,5 +1,4 @@
 #![no_std]
-#![allow(clippy::unused_unit)]
 
 //! Creditra credit contract: credit lines, draw/repay, risk parameters.
 //!
@@ -33,7 +32,7 @@ use events::{
     publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
-use types::{CreditLineData, CreditStatus};
+use types::{CreditLineData, CreditStatus, RateChangeConfig};
 
 /// Maximum interest rate in basis points (100%).
 const MAX_INTEREST_RATE_BPS: u32 = 10_000;
@@ -49,6 +48,10 @@ fn reentrancy_key(env: &Env) -> Symbol {
 /// Instance storage key for admin.
 fn admin_key(env: &Env) -> Symbol {
     Symbol::new(env, "admin")
+}
+
+fn rate_cfg_key(env: &Env) -> Symbol {
+    Symbol::new(env, "rate_cfg")
 }
 
 fn require_admin(env: &Env) -> Address {
@@ -107,34 +110,34 @@ pub struct Credit;
 
 #[contractimpl]
 impl Credit {
-    /// @notice Initializes contract-level configuration.
-    /// @dev Sets admin and defaults liquidity source to this contract address.
-    pub fn init(env: Env, admin: Address) -> () {
+    /// Initializes contract-level configuration.
+    ///
+    /// Sets admin and defaults liquidity source to this contract address.
+    pub fn init(env: Env, admin: Address) {
         env.storage().instance().set(&admin_key(&env), &admin);
         env.storage()
             .instance()
             .set(&DataKey::LiquiditySource, &env.current_contract_address());
-        ()
     }
 
-    /// @notice Sets the token contract used for reserve/liquidity checks and draw transfers.
-    /// @dev Admin-only.
-    pub fn set_liquidity_token(env: Env, token_address: Address) -> () {
+    /// Sets the token contract used for reserve/liquidity checks and draw transfers.
+    ///
+    /// Admin-only.
+    pub fn set_liquidity_token(env: Env, token_address: Address) {
         require_admin_auth(&env);
         env.storage()
             .instance()
             .set(&DataKey::LiquidityToken, &token_address);
-        ()
     }
 
-    /// @notice Sets the address that provides liquidity for draw operations.
-    /// @dev Admin-only. If unset, init config uses the contract address.
-    pub fn set_liquidity_source(env: Env, reserve_address: Address) -> () {
+    /// Sets the address that provides liquidity for draw operations.
+    ///
+    /// Admin-only. If unset, init config uses the contract address.
+    pub fn set_liquidity_source(env: Env, reserve_address: Address) {
         require_admin_auth(&env);
         env.storage()
             .instance()
             .set(&DataKey::LiquiditySource, &reserve_address);
-        ()
     }
 
     /// Open a new credit line for a borrower (called by backend/risk engine).
@@ -202,61 +205,11 @@ impl Credit {
                 risk_score,
             },
         );
-
-
-
-    /// Draw from credit line (borrower).
- 
-    /// Errors with ContractError if credit line does not exist, is Closed, or borrower has not authorized.
-
-    /// Reverts if credit line does not exist, is Closed, borrower has not authorized,
-    /// or the provided borrower does not match the stored credit line owner.
- 
- 
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
-
-
-    /// Draw from credit line: verifies limit, updates utilized_amount,
-    /// and transfers the protocol token from the contract reserve to the borrower.
-    ///
-    /// # Panics
-    /// - `"Credit line not found"` – borrower has no open credit line
-    /// - `"credit line is closed"` – line is closed
-    /// - `"Credit line not active"` – line is suspended or defaulted
-    /// - `"exceeds credit limit"` – draw would push utilized_amount past credit_limit
-    /// - `"amount must be positive"` – amount is zero or negative
-    /// - `"reentrancy guard"` – re-entrant call detected
-
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
- 
-
-    /// Draw from credit line (borrower).
-    /// Reverts if credit line does not exist, is Closed/Suspended, or borrower has not authorized.
-    /// Reverts if credit line does not exist, is Closed, or borrower has not authorized.
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
-        set_reentrancy_guard(&env);
-        borrower.require_auth();
-
     }
 
 
 
-    /// Update risk parameters for an existing credit line.
-    ///
-    /// Called by admin or risk engine when a borrower's risk profile changes.
-    ///
-    /// # Parameters
-    /// - `borrower`: The borrower's address.
-    /// - `credit_limit`: New credit limit.
-    /// - `interest_rate_bps`: New interest rate in basis points.
-    /// - `risk_score`: New risk score.
-    ///
-    /// # Note
-    /// Not yet implemented. Planned logic: load existing record, update fields,
-    /// persist updated [`CreditLineData`].
-    /// @notice Draws credit by transferring liquidity tokens to the borrower.
-    /// @dev Enforces status/limit/liquidity checks and uses a reentrancy guard.
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
         set_reentrancy_guard(&env);
         borrower.require_auth();
 
@@ -317,7 +270,6 @@ impl Credit {
             },
         );
         clear_reentrancy_guard(&env);
-        ()
     }
 
     /// Repay credit (borrower).
@@ -534,6 +486,8 @@ impl Credit {
                 risk_score: credit_line.risk_score,
             },
         );
+    }
+
 
     /// Mark a credit line as defaulted (admin only).
     ///
@@ -564,6 +518,8 @@ impl Credit {
                 risk_score: credit_line.risk_score,
             },
         );
+    }
+
 
     /// Reinstate a defaulted credit line to Active (admin only).
     ///
@@ -598,11 +554,9 @@ impl Credit {
         );
     }
 
-    /// Read-only getter for credit line by borrower
-    ///
-    /// @param borrower The address to query
-    /// @return Option<CreditLineData> Full data or None if no line exists
     /// Get credit line data for a borrower (view function).
+    ///
+    /// Returns the full `CreditLineData` or `None` if no credit line exists.
     pub fn get_credit_line(env: Env, borrower: Address) -> Option<CreditLineData> {
         env.storage().persistent().get(&borrower)
     }
@@ -610,19 +564,13 @@ impl Credit {
 
 #[cfg(test)]
 mod test {
-    soroban_sdk::contractimpl! { export! CreditImpl }
-
-    use soroban_sdk::contractclient::ContractClient;
     use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Events as _;
     use soroban_sdk::token;
-    use soroban_sdk::contractclient::ContractClient;
-use soroban_sdk::testutils::Events;
+    use soroban_sdk::testutils::Events;
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Symbol, TryFromVal, TryIntoVal};
-
-    type CreditClient<'a> = soroban_sdk::contractclient::ContractClient<'a, CreditImpl>;
+    use soroban_sdk::Symbol;
 
     fn setup_test(env: &Env) -> (Address, Address, Address) {
         env.mock_all_auths();
