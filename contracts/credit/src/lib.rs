@@ -287,7 +287,7 @@ impl Credit {
                 .instance()
                 .get(&DataKey::LiquiditySource)
                 .unwrap_or(env.current_contract_address());
-            
+
             let token_client = token::Client::new(&env, &token_address);
             let effective_amount = amount.min(credit_line.utilized_amount);
             if effective_amount > 0 {
@@ -512,7 +512,9 @@ impl Credit {
             .get(&borrower)
             .expect("Credit line not found");
 
-        if credit_line.status != CreditStatus::Active && credit_line.status != CreditStatus::Suspended {
+        if credit_line.status != CreditStatus::Active
+            && credit_line.status != CreditStatus::Suspended
+        {
             panic!("invalid source status for default");
         }
 
@@ -756,10 +758,11 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let borrower = Address::generate(&env);
-        let (client, token_address, _admin) = setup_contract_with_credit_line(&env, &borrower, 1000, 1000);
+        let (client, token_address, _admin) =
+            setup_contract_with_credit_line(&env, &borrower, 1000, 1000);
 
         client.draw_credit(&borrower, &300_i128);
-        
+
         let token_client = token::Client::new(&env, &token_address);
         assert_eq!(token_client.balance(&borrower), 300);
     }
@@ -769,8 +772,9 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
         let borrower = Address::generate(&env);
-        let (client, token_address, _admin) = setup_contract_with_credit_line(&env, &borrower, 1000, 1000);
-        
+        let (client, token_address, _admin) =
+            setup_contract_with_credit_line(&env, &borrower, 1000, 1000);
+
         let sac = StellarAssetClient::new(&env, &token_address);
         sac.mint(&borrower, &500_i128);
 
@@ -779,7 +783,7 @@ mod test {
 
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.utilized_amount, 200);
-        
+
         let token_client = token::Client::new(&env, &token_address);
         // Initial 500 + drawn 400 - repaid 200 = 700
         assert_eq!(token_client.balance(&borrower), 700);
