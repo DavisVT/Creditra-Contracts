@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #![no_std]
 #![allow(clippy::unused_unit)]
 
@@ -33,13 +35,18 @@ use events::{
     publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
-use types::{CreditLineData, CreditStatus};
+use types::{CreditLineData, CreditStatus, RateChangeConfig};
 
 /// Maximum interest rate in basis points (100%).
 const MAX_INTEREST_RATE_BPS: u32 = 10_000;
 
 /// Maximum risk score (0–100 scale).
 const MAX_RISK_SCORE: u32 = 100;
+
+/// Instance storage key for rate change configuration.
+fn rate_cfg_key(env: &Env) -> Symbol {
+    Symbol::new(env, "rate_cfg")
+}
 
 /// Instance storage key for reentrancy guard.
 fn reentrancy_key(env: &Env) -> Symbol {
@@ -202,58 +209,8 @@ impl Credit {
                 risk_score,
             },
         );
-
-
-
-    /// Draw from credit line (borrower).
- 
-    /// Errors with ContractError if credit line does not exist, is Closed, or borrower has not authorized.
-
-    /// Reverts if credit line does not exist, is Closed, borrower has not authorized,
-    /// or the provided borrower does not match the stored credit line owner.
- 
- 
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
-
-
-    /// Draw from credit line: verifies limit, updates utilized_amount,
-    /// and transfers the protocol token from the contract reserve to the borrower.
-    ///
-    /// # Panics
-    /// - `"Credit line not found"` – borrower has no open credit line
-    /// - `"credit line is closed"` – line is closed
-    /// - `"Credit line not active"` – line is suspended or defaulted
-    /// - `"exceeds credit limit"` – draw would push utilized_amount past credit_limit
-    /// - `"amount must be positive"` – amount is zero or negative
-    /// - `"reentrancy guard"` – re-entrant call detected
-
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
- 
-
-    /// Draw from credit line (borrower).
-    /// Reverts if credit line does not exist, is Closed/Suspended, or borrower has not authorized.
-    /// Reverts if credit line does not exist, is Closed, or borrower has not authorized.
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
-        set_reentrancy_guard(&env);
-        borrower.require_auth();
-
     }
 
-
-
-    /// Update risk parameters for an existing credit line.
-    ///
-    /// Called by admin or risk engine when a borrower's risk profile changes.
-    ///
-    /// # Parameters
-    /// - `borrower`: The borrower's address.
-    /// - `credit_limit`: New credit limit.
-    /// - `interest_rate_bps`: New interest rate in basis points.
-    /// - `risk_score`: New risk score.
-    ///
-    /// # Note
-    /// Not yet implemented. Planned logic: load existing record, update fields,
-    /// persist updated [`CreditLineData`].
     /// @notice Draws credit by transferring liquidity tokens to the borrower.
     /// @dev Enforces status/limit/liquidity checks and uses a reentrancy guard.
     pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
@@ -534,6 +491,7 @@ impl Credit {
                 risk_score: credit_line.risk_score,
             },
         );
+    }
 
     /// Mark a credit line as defaulted (admin only).
     ///
@@ -564,6 +522,7 @@ impl Credit {
                 risk_score: credit_line.risk_score,
             },
         );
+    }
 
     /// Reinstate a defaulted credit line to Active (admin only).
     ///
@@ -610,19 +569,10 @@ impl Credit {
 
 #[cfg(test)]
 mod test {
-    soroban_sdk::contractimpl! { export! CreditImpl }
-
-    use soroban_sdk::contractclient::ContractClient;
     use super::*;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::testutils::{Address as _, Events};
     use soroban_sdk::token;
-    use soroban_sdk::contractclient::ContractClient;
-use soroban_sdk::testutils::Events;
     use soroban_sdk::token::StellarAssetClient;
-    use soroban_sdk::{Symbol, TryFromVal, TryIntoVal};
-
-    type CreditClient<'a> = soroban_sdk::contractclient::ContractClient<'a, CreditImpl>;
 
     fn setup_test(env: &Env) -> (Address, Address, Address) {
         env.mock_all_auths();
