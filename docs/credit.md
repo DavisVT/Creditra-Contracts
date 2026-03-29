@@ -1,5 +1,7 @@
   # Credit Contract Documentation
 
+**Version: 2026-03-26**
+
 The `Credit` contract implements on-chain credit lines for the Creditra protocol on Stellar Soroban. It manages the full lifecycle of a borrower's credit line — from opening to closing or defaulting — and emits events at each stage.
 
 For indexer-specific event ingestion and decoding guidance, see `docs/indexer-integration.md`.
@@ -9,6 +11,7 @@ For indexer-specific event ingestion and decoding guidance, see `docs/indexer-in
 ## Data Model
 
 ### `CreditLineData`
+
 Stored in persistent storage keyed by the borrower's address.
 
 | Field                | Type     | Description |
@@ -105,16 +108,18 @@ Configure rate-change limits (admin only).
 ### `get_rate_change_limits(env) -> Option<RateChangeConfig>`
 Returns the current rate-change configuration (or `None` if not set).
 ### `update_risk_parameters(env, borrower, credit_limit, interest_rate_bps, risk_score)`
+
 Update the risk parameters for an existing credit line. Admin-only.
 
-| Parameter | Type | Description |
-|---|---|---|
-| `borrower` | `Address` | Borrower whose credit line to update |
-| `credit_limit` | `i128` | New credit limit (must be ≥ current `utilized_amount`) |
-| `interest_rate_bps` | `u32` | New interest rate in basis points (0–10000) |
-| `risk_score` | `u32` | New risk score (0–100) |
+| Parameter           | Type      | Description                                            |
+| ------------------- | --------- | ------------------------------------------------------ |
+| `borrower`          | `Address` | Borrower whose credit line to update                   |
+| `credit_limit`      | `i128`    | New credit limit (must be ≥ current `utilized_amount`) |
+| `interest_rate_bps` | `u32`     | New interest rate in basis points (0–10000)            |
+| `risk_score`        | `u32`     | New risk score (0–100)                                 |
 
 #### Rate-change limits (optional, backward-compatible)
+
 When a `RateChangeConfig` has been set via `set_rate_change_limits`, the following
 checks are enforced **only when the interest rate is actually changing**:
 
@@ -128,20 +133,22 @@ On a successful rate change, `last_rate_update_ts` is updated to the current
 ledger timestamp.
 
 #### Errors
-| Condition | Panic message |
-|---|---|
-| Caller is not admin | Auth error |
-| Credit line not found | `ContractError::CreditLineNotFound` |
-| `credit_limit < utilized_amount` | `ContractError::OverLimit` |
-| `credit_limit < 0` | `ContractError::NegativeLimit` |
-| `interest_rate_bps > 10000` | `ContractError::RateTooHigh` |
-| `risk_score > 100` | `ContractError::ScoreTooHigh` |
-| Rate delta exceeds max | `"rate change exceeds maximum allowed delta"` |
-| Too soon since last change | `"rate change too soon: minimum interval not elapsed"` |
+
+| Condition                        | Panic message                                          |
+| -------------------------------- | ------------------------------------------------------ |
+| Caller is not admin              | Auth error                                             |
+| Credit line not found            | `ContractError::CreditLineNotFound`                    |
+| `credit_limit < utilized_amount` | `ContractError::OverLimit`                             |
+| `credit_limit < 0`               | `ContractError::NegativeLimit`                         |
+| `interest_rate_bps > 10000`      | `ContractError::RateTooHigh`                           |
+| `risk_score > 100`               | `ContractError::ScoreTooHigh`                          |
+| Rate delta exceeds max           | `"rate change exceeds maximum allowed delta"`          |
+| Too soon since last change       | `"rate change too soon: minimum interval not elapsed"` |
 
 Emits: `RiskParametersUpdatedEvent` with borrower, new credit limit, new rate, new score.
 
 #### Security notes
+
 - Rate-change config is optional and stored in instance storage.
 - Absence of config means **no limits** — fully backward-compatible.
 - `last_rate_update_ts = 0` (never updated) always bypasses the interval check,
@@ -190,20 +197,20 @@ View function — returns credit line data or `None`.
 
 The `Credit` contract uses standard `u32` discriminants for standardized error handling across the Rust and TypeScript SDK clients. Integrator clients can match these error codes to understand failure reasons.
 
-| Error Code | Variant | Description |
-|---|---|---|
-| `1` | `Unauthorized` | Caller is not authorized to perform this action. |
-| `2` | `NotAdmin` | Caller does not have admin privileges. |
-| `3` | `CreditLineNotFound` | The specified credit line was not found. |
-| `4` | `CreditLineClosed` | Action cannot be performed because the credit line is closed. |
-| `5` | `InvalidAmount` | The requested amount is invalid (e.g., zero or negative). |
-| `6` | `OverLimit` | The requested draw exceeds the available credit limit. |
-| `7` | `NegativeLimit` | The credit limit cannot be negative. |
-| `8` | `RateTooHigh` | The interest rate change exceeds the maximum allowed delta. |
-| `9` | `ScoreTooHigh` | The risk score is above the acceptable maximum threshold. |
-| `10` | `UtilizationNotZero` | Action cannot be performed because the credit line utilization is not zero. |
-| `11` | `Reentrancy` | Reentrancy detected during cross-contract calls. |
-| `12` | `Overflow` | Math overflow occurred during calculation. |
+| Error Code | Variant              | Description                                                                 |
+| ---------- | -------------------- | --------------------------------------------------------------------------- |
+| `1`        | `Unauthorized`       | Caller is not authorized to perform this action.                            |
+| `2`        | `NotAdmin`           | Caller does not have admin privileges.                                      |
+| `3`        | `CreditLineNotFound` | The specified credit line was not found.                                    |
+| `4`        | `CreditLineClosed`   | Action cannot be performed because the credit line is closed.               |
+| `5`        | `InvalidAmount`      | The requested amount is invalid (e.g., zero or negative).                   |
+| `6`        | `OverLimit`          | The requested draw exceeds the available credit limit.                      |
+| `7`        | `NegativeLimit`      | The credit limit cannot be negative.                                        |
+| `8`        | `RateTooHigh`        | The interest rate change exceeds the maximum allowed delta.                 |
+| `9`        | `ScoreTooHigh`       | The risk score is above the acceptable maximum threshold.                   |
+| `10`       | `UtilizationNotZero` | Action cannot be performed because the credit line utilization is not zero. |
+| `11`       | `Reentrancy`         | Reentrancy detected during cross-contract calls.                            |
+| `12`       | `Overflow`           | Math overflow occurred during calculation.                                  |
 
 ---
 
@@ -224,20 +231,22 @@ The `Credit` contract uses standard `u32` discriminants for standardized error h
 
 ## Access Control
 
-| Function | Caller |
-|---|---|
-| `init` | Deployer (once) |
-| `open_credit_line` | Backend / risk engine |
-| `draw_credit` | Borrower |
-| `repay_credit` | Borrower |
-| `update_risk_parameters` | Admin / risk engine |
-| `suspend_credit_line` | Admin |
-| `close_credit_line` | Admin or borrower |
-| `default_credit_line` | Admin |
-| `reinstate_credit_line` | Admin |
-| `set_rate_change_limits` | Admin |
-| `get_rate_change_limits` | Anyone (view) |
-| `get_credit_line` | Anyone (view) |
+| Function                 | Caller                |
+| ------------------------ | --------------------- |
+| `init`                   | Deployer (once)       |
+| `open_credit_line`       | Backend / risk engine |
+| `draw_credit`            | Borrower              |
+| `repay_credit`           | Borrower              |
+| `update_risk_parameters` | Admin / risk engine   |
+| `suspend_credit_line`    | Admin                 |
+| `close_credit_line`      | Admin or borrower     |
+| `default_credit_line`    | Admin                 |
+| `reinstate_credit_line`  | Admin                 |
+| `set_liquidity_token`    | Admin                 |
+| `set_liquidity_source`   | Admin                 |
+| `set_rate_change_limits` | Admin                 |
+| `get_rate_change_limits` | Anyone (view)         |
+| `get_credit_line`        | Anyone (view)         |
 
 > Note: On-chain authorization via `require_auth()` is not yet enforced in all functions. This is planned for a future release.
 
@@ -370,6 +379,7 @@ All sensitive functions enforce authorization via `require_auth()`.
 ---
 
 ## Running Tests
+
 ```bash
 cargo test
 ```
