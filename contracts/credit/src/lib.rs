@@ -621,10 +621,23 @@ impl Credit {
             .get(&borrower)
             .expect("Credit line not found");
 
+        // Idempotent: already closed
         if credit_line.status == CreditStatus::Closed {
             return;
         }
 
+        // Validate that the current state allows closing
+        match credit_line.status {
+            CreditStatus::Active | CreditStatus::Suspended | CreditStatus::Defaulted => {
+                // These states can be closed
+            }
+            CreditStatus::Closed => {
+                // Already handled above
+                return;
+            }
+        }
+
+        // Authorization check: admin can always close, borrower only if utilization is zero
         let allowed = closer == admin || (closer == borrower && credit_line.utilized_amount == 0);
 
         if !allowed {
