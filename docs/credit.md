@@ -229,6 +229,28 @@ View function — returns credit line data or `None`.
 
 ---
 
+## Overflow Policy
+
+Arithmetic paths that affect credit limit and utilization use checked math.
+
+- `draw_credit`: utilization update uses `checked_add`; arithmetic overflow reverts with `ContractError::Overflow` (`12`).
+- `repay_credit`: applied repayment is capped to current utilization, then utilization update uses `checked_sub`; arithmetic overflow reverts with `ContractError::Overflow` (`12`).
+- `update_risk_parameters`: limit/risk bounds are validated before state updates; rate delta uses `abs_diff` for overflow-safe unsigned distance checks.
+
+### Large-number test coverage
+
+The contract test suite includes explicit large-value coverage:
+
+- `test_draw_credit_near_i128_max_succeeds_without_overflow`
+- `test_draw_credit_overflow_reverts_with_defined_error`
+- `test_draw_credit_large_values_exceed_limit_reverts_with_defined_error`
+- `test_repay_credit_large_amount_caps_at_zero_without_underflow`
+- `test_update_risk_parameters_rejects_limit_below_utilized_near_i128_max`
+
+These tests validate behavior near `i128::MAX` and confirm overflow handling remains deterministic.
+
+---
+
 ## Error Codes
 
 The `Credit` contract uses standard `u32` discriminants for standardized error handling across the Rust and TypeScript SDK clients. Integrator clients can match these error codes to understand failure reasons.
@@ -263,6 +285,10 @@ The `Credit` contract uses standard `u32` discriminants for standardized error h
 | `("credit", "reinstate")`  | `reinstate`| `reinstate_credit_line`     | Line reinstated |
 | `("credit", "risk_updated")`| `risk_updated` | `update_risk_parameters` | Risk parameters changed |
 
+The contract also emits additive v2 event topics (for indexer analytics fields
+like actor/source/timestamp identifiers) while keeping v1 payloads stable. See
+[`docs/indexer-integration.md`](indexer-integration.md) for full topic mapping.
+
 ---
 
 ## Access Control
@@ -285,6 +311,11 @@ The `Credit` contract uses standard `u32` discriminants for standardized error h
 | `get_credit_line`        | Anyone (view)         |
 
 > Note: `open_credit_line` requires admin authorization (`require_auth`). The admin key is the backend/risk engine signer — borrowers cannot open their own credit lines.
+
+### Related Admin Workflows
+
+- Default lifecycle: `default_credit_line` → optional `suspend_credit_line` containment → `reinstate_credit_line` or `close_credit_line`.
+- Oracle-assisted default design: `docs/default-oracle.md`.
 
 ---
 
@@ -417,5 +448,62 @@ All sensitive functions enforce authorization via `require_auth()`.
 ## Running Tests
 
 ```bash
-cargo test
+cargo test -p creditra-credit
 ```
+
+---
+
+## Appendix: Storage Key Audit
+
+### Instance Storage
+
+Keys that share the contract instance TTL. If the instance is archived, all
+these keys are lost. Production deployments should call
+`env.storage().instance().extend_ttl()` periodically.
+
+| Key | Rust type | Value type | Written by | Notes |
+|-----|-----------|------------|------------|-------|
+| `Symbol("admin")` | `Symbol` | `Address` | `init` | Contract admin. Exactly one per deployment. |
+| `DataKey::LiquidityToken` | `DataKey` | `Address` | `set_liquidity_token` | Token contract for reserve/draw transfers. |
+| `DataKey::LiquiditySource` | `DataKey` | `Address` | `init`, `set_liquidity_source` | Reserve address. Defaults to contract address. |
+| `Symbol("reentrancy")` | `Symbol` | `bool` | `set_reentrancy_guard`, `clear_reentrancy_guard` | Defense-in-depth flag. Cleared on every code path. |
+| `Symbol("rate_cfg")` | `Symbol` | `RateChangeConfig` | `set_rate_change_limits` | Admin-configurable rate-change governance. |
+
+**Why instance?** These are global singleton configuration values. There is
+exactly one admin, one liquidity token, one liquidity source, and one rate
+config per contract deployment. Instance storage is correct.
+
+### Persistent Storage
+
+Per-borrower records with independent TTL per entry.
+
+| Key | Rust type | Value type | Written by | Notes |
+|-----|-----------|------------|------------|-------|
+| Borrower `Address` | `Address` | `CreditLineData` | `open_credit_line`, `draw_credit`, `repay_credit`, `update_risk_parameters`, status transitions | Long-lived borrower data. Independent TTL. |
+
+**Why persistent?** Each borrower's credit line must survive beyond a single
+transaction and has an independent lifecycle. Persistent is correct. If a
+borrower's entry TTL expires (archival), their credit line data is lost —
+production deployments should bump TTL on access or via a keeper.
+
+### Temporary Storage
+
+Not currently used. Future candidate: the reentrancy guard could move to
+temporary storage since it only needs to survive within a single invocation.
+Instance storage works correctly today because it is always cleared.
+
+### Audit Findings
+
+1. **Admin** — correctly on instance. Single value, global.
+2. **LiquidityToken / LiquiditySource** — correctly on instance. Global config.
+3. **Reentrancy flag** — correctly on instance (cleared every call). Could
+   optionally move to temporary storage for cleaner semantics.
+4. **Rate config** — correctly on instance. Global governance parameter.
+5. **Borrower records** — correctly on persistent. Per-entity, long-lived.
+6. **No borrower data on instance** — verified. No volatile/instance keys are
+   used for per-borrower data.
+7. **TTL management** — not yet implemented. Recommend adding
+   `extend_ttl()` calls on instance (in `init` or a dedicated `bump` endpoint)
+   and on persistent (on credit line access) before production deployment.
+
+You can also run all workspace tests from the repository root with `cargo test`.

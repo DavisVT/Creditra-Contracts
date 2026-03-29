@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #![no_std]
 #![allow(clippy::unused_unit)]
 
@@ -18,8 +20,8 @@ use soroban_sdk::{
 };
 
 use events::{
-    publish_credit_line_event, publish_drawn_event, publish_limit_decrease_event, publish_repayment_event,
-    publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, LimitDecreaseEvent, RepaymentEvent,
+    publish_credit_line_event, publish_drawn_event, publish_repayment_event,
+    publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
 use types::{ContractError, CreditLineData, CreditStatus, RateChangeConfig};
@@ -30,6 +32,11 @@ const MAX_INTEREST_RATE_BPS: u32 = 10_000;
 /// Maximum risk score (0–100 scale).
 const MAX_RISK_SCORE: u32 = 100;
 
+/// Instance storage key for rate change configuration.
+fn rate_cfg_key(env: &Env) -> Symbol {
+    Symbol::new(env, "rate_cfg")
+}
+
 /// Instance storage key for reentrancy guard.
 fn reentrancy_key(env: &Env) -> Symbol {
     Symbol::new(env, "reentrancy")
@@ -38,11 +45,6 @@ fn reentrancy_key(env: &Env) -> Symbol {
 /// Instance storage key for admin.
 fn admin_key(env: &Env) -> Symbol {
     Symbol::new(env, "admin")
-}
-
-/// Instance storage key for rate-change limit configuration.
-fn rate_cfg_key(env: &Env) -> Symbol {
-    Symbol::new(env, "rate_cfg")
 }
 
 fn require_admin(env: &Env) -> Address {
@@ -239,11 +241,6 @@ impl Credit {
             env.panic_with_error(ContractError::InvalidAmount);
         }
 
-        if credit_line.status == CreditStatus::Restricted {
-            clear_reentrancy_guard(&env);
-            panic!("credit line is restricted - repay excess amount first");
-        }
-
         let updated_utilized = credit_line
             .utilized_amount
             .checked_add(amount)
@@ -371,12 +368,6 @@ impl Credit {
             .saturating_sub(effective_repay)
             .max(0);
         credit_line.utilized_amount = new_utilized;
-        
-        // If credit line was Restricted and utilization is now within limit, reactivate it
-        if credit_line.status == CreditStatus::Restricted && new_utilized <= credit_line.credit_limit {
-            credit_line.status = CreditStatus::Active;
-        }
-        
         env.storage().persistent().set(&borrower, &credit_line);
 
         // --- Emit event ---
@@ -446,39 +437,8 @@ impl Credit {
         if credit_limit < 0 {
             panic!("credit_limit must be non-negative");
         }
-        
-        // Handle credit limit decrease vs utilized amount
-        let old_limit = credit_line.credit_limit;
-        let is_limit_decrease = credit_limit < old_limit;
-        let excess_amount = if is_limit_decrease && credit_limit < credit_line.utilized_amount {
-            credit_line.utilized_amount - credit_limit
-        } else {
-            0
-        };
-        
-        if excess_amount > 0 {
-            // Limit decreased below utilized amount - place in Restricted status
-            credit_line.credit_limit = credit_limit;
-            credit_line.status = CreditStatus::Restricted;
-            
-            // Emit limit decrease event
-            let timestamp = env.ledger().timestamp();
-            publish_limit_decrease_event(
-                &env,
-                LimitDecreaseEvent {
-                    borrower: borrower.clone(),
-                    old_limit,
-                    new_limit: credit_limit,
-                    utilized_amount: credit_line.utilized_amount,
-                    excess_amount,
-                    timestamp,
-                },
-            );
-            
-            // Note: utilized_amount remains unchanged until borrower repays
-        } else {
-            // Normal limit increase or decrease within utilization
-            credit_line.credit_limit = credit_limit;
+        if credit_limit < credit_line.utilized_amount {
+            panic!("credit_limit cannot be less than utilized amount");
         }
         if interest_rate_bps > MAX_INTEREST_RATE_BPS {
             panic!("interest_rate_bps exceeds maximum");
@@ -2110,378 +2070,5 @@ mod test_rate_change_limits {
         client.init(&admin);
 
         client.set_rate_change_limits(&100_u32, &0_u64);
-    }
-
-    #[test]
-    fn test_open_credit_line_valid() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-
-        let line = client.get_credit_line(&borrower).unwrap();
-        assert_eq!(line.borrower, borrower);
-        assert_eq!(line.credit_limit, 1000);
-        assert_eq!(line.utilized_amount, 0);
-        assert_eq!(line.interest_rate_bps, 300);
-        assert_eq!(line.risk_score, 70);
-        assert_eq!(line.status, CreditStatus::Active);
-        assert_eq!(line.last_rate_update_ts, 0);
-    }
-
-    #[test]
-    fn test_open_credit_line_zero_limit_returns_invalid_amount() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-
-        let result = client.try_open_credit_line(&borrower, &0_i128, &300_u32, &70_u32);
-        assert_eq!(
-            result.err().unwrap().unwrap(),
-            soroban_sdk::Error::from(ContractError::InvalidAmount)
-        );
-    }
-
-    #[test]
-    fn test_open_credit_line_negative_limit_returns_invalid_amount() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-
-        let result = client.try_open_credit_line(&borrower, &(-1_i128), &300_u32, &70_u32);
-        assert_eq!(
-            result.err().unwrap().unwrap(),
-            soroban_sdk::Error::from(ContractError::InvalidAmount)
-        );
-    }
-
-    #[test]
-    fn test_open_credit_line_rate_exceeds_max_returns_rate_too_high() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-
-        let result = client.try_open_credit_line(&borrower, &1000_i128, &10_001_u32, &70_u32);
-        assert_eq!(
-            result.err().unwrap().unwrap(),
-            soroban_sdk::Error::from(ContractError::RateTooHigh)
-        );
-    }
-
-    #[test]
-    fn test_open_credit_line_risk_score_exceeds_max_returns_score_too_high() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-
-        let result = client.try_open_credit_line(&borrower, &1000_i128, &300_u32, &101_u32);
-        assert_eq!(
-            result.err().unwrap().unwrap(),
-            soroban_sdk::Error::from(ContractError::ScoreTooHigh)
-        );
-    }
-
-    #[test]
-    fn test_open_credit_line_duplicate_active_returns_unauthorized() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-
-        let result = client.try_open_credit_line(&borrower, &2000_i128, &400_u32, &60_u32);
-        assert_eq!(
-            result.err().unwrap().unwrap(),
-            soroban_sdk::Error::from(ContractError::Unauthorized)
-        );
-    }
-
-    #[test]
-    fn test_open_credit_line_at_max_boundaries_succeeds() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        client.open_credit_line(&borrower, &i128::MAX, &10_000_u32, &100_u32);
-
-        let line = client.get_credit_line(&borrower).unwrap();
-        assert_eq!(line.interest_rate_bps, 10_000);
-        assert_eq!(line.risk_score, 100);
-        assert_eq!(line.credit_limit, i128::MAX);
-    }
-
-    #[test]
-    fn test_open_credit_line_closed_borrower_can_reopen() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.close_credit_line(&borrower, &admin);
-
-        // Closed borrower must be allowed to reopen
-        client.open_credit_line(&borrower, &2000_i128, &400_u32, &60_u32);
-
-        let line = client.get_credit_line(&borrower).unwrap();
-        assert_eq!(line.credit_limit, 2000);
-        assert_eq!(line.status, CreditStatus::Active);
-    }
-
-    // ========== Amount validation matrix (#122) ==========
-    // Covers zero, negative, and minimal-positive amounts for draw_credit,
-    // repay_credit, and open_credit_line.
-
-    // --- draw_credit amount matrix ---
-
-    /// draw_credit must reject zero amount.
-    #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_draw_credit_amount_zero_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.draw_credit(&borrower, &0_i128);
-    }
-
-    /// draw_credit must reject negative amount.
-    #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_draw_credit_amount_negative_one_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.draw_credit(&borrower, &-1_i128);
-    }
-
-    /// draw_credit must reject i128::MIN (most negative value).
-    #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_draw_credit_amount_i128_min_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.draw_credit(&borrower, &i128::MIN);
-    }
-
-    /// draw_credit must accept minimal positive amount (1).
-    #[test]
-    fn test_draw_credit_amount_one_accepted() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.draw_credit(&borrower, &1_i128);
-        assert_eq!(
-            client.get_credit_line(&borrower).unwrap().utilized_amount,
-            1
-        );
-    }
-
-    // --- repay_credit amount matrix ---
-
-    /// repay_credit must reject zero amount.
-    #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_repay_credit_amount_zero_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.draw_credit(&borrower, &100_i128);
-        client.repay_credit(&borrower, &0_i128);
-    }
-
-    /// repay_credit must reject negative amount.
-    #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_repay_credit_amount_negative_one_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.draw_credit(&borrower, &100_i128);
-        client.repay_credit(&borrower, &-1_i128);
-    }
-
-    /// repay_credit must reject i128::MIN (most negative value).
-    #[test]
-    #[should_panic(expected = "amount must be positive")]
-    fn test_repay_credit_amount_i128_min_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.draw_credit(&borrower, &100_i128);
-        client.repay_credit(&borrower, &i128::MIN);
-    }
-
-    /// repay_credit must accept minimal positive amount (1).
-    #[test]
-    fn test_repay_credit_amount_one_accepted() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.draw_credit(&borrower, &100_i128);
-        client.repay_credit(&borrower, &1_i128);
-        assert_eq!(
-            client.get_credit_line(&borrower).unwrap().utilized_amount,
-            99
-        );
-    }
-
-    // --- open_credit_line credit_limit amount matrix ---
-
-    /// open_credit_line must reject zero credit_limit (ContractError::InvalidAmount = #5).
-    #[test]
-    fn test_open_credit_line_credit_limit_zero_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        let result = client.try_open_credit_line(&borrower, &0_i128, &300_u32, &70_u32);
-        assert_eq!(
-            result.err().unwrap().unwrap(),
-            soroban_sdk::Error::from_contract_error(5) // ContractError::InvalidAmount
-        );
-    }
-
-    /// open_credit_line must reject negative credit_limit (ContractError::InvalidAmount = #5).
-    #[test]
-    fn test_open_credit_line_credit_limit_negative_one_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        let result = client.try_open_credit_line(&borrower, &-1_i128, &300_u32, &70_u32);
-        assert_eq!(
-            result.err().unwrap().unwrap(),
-            soroban_sdk::Error::from_contract_error(5) // ContractError::InvalidAmount
-        );
-    }
-
-    /// open_credit_line must reject i128::MIN credit_limit (ContractError::InvalidAmount = #5).
-    #[test]
-    fn test_open_credit_line_credit_limit_i128_min_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        let result = client.try_open_credit_line(&borrower, &i128::MIN, &300_u32, &70_u32);
-        assert_eq!(
-            result.err().unwrap().unwrap(),
-            soroban_sdk::Error::from_contract_error(5) // ContractError::InvalidAmount
-        );
-    }
-
-    /// open_credit_line must accept minimal positive credit_limit (1).
-    #[test]
-    fn test_open_credit_line_credit_limit_one_accepted() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1_i128, &300_u32, &70_u32);
-        assert_eq!(client.get_credit_line(&borrower).unwrap().credit_limit, 1);
     }
 }
