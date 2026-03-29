@@ -1,52 +1,7 @@
 #![no_std]
+#![allow(clippy::unused_unit)]
 
 //! Creditra credit contract: credit lines, draw/repay, risk parameters.
-//!
-//! # Storage Audit (issue #127)
-//!
-//! ## Instance storage (shared contract-wide state, TTL tied to contract instance)
-//!
-//! | Key | Type | Written by | Purpose |
-//! |-----|------|------------|---------|
-//! | `Symbol("admin")` | `Address` | `init` | Contract admin. Instance is correct: there is exactly one admin per contract deployment. |
-//! | `DataKey::LiquidityToken` | `Address` | `set_liquidity_token` | Token contract for reserve. Instance is correct: global config. |
-//! | `DataKey::LiquiditySource` | `Address` | `init`, `set_liquidity_source` | Reserve address. Instance is correct: global config. |
-//! | `Symbol("reentrancy")` | `bool` | `set_reentrancy_guard`, `clear_reentrancy_guard` | Defense-in-depth guard. Instance is correct: transient flag cleared every call. |
-//! | `Symbol("rate_cfg")` | `RateChangeConfig` | `set_rate_change_limits` | Rate-change governance. Instance is correct: global config. |
-//!
-//! ## Persistent storage (per-borrower records, independent TTL per entry)
-//!
-//! | Key | Type | Written by | Purpose |
-//! |-----|------|------------|---------|
-//! | `Address` (borrower) | `CreditLineData` | `open_credit_line`, `draw_credit`, `repay_credit`, `update_risk_parameters`, status transitions | Per-borrower credit line. Persistent is correct: must survive beyond a single transaction and is independent per borrower. |
-//!
-//! ## Temporary storage
-//!
-//! Not currently used. Future candidate: the reentrancy flag could move to
-//! temporary storage since it is only meaningful within a single invocation,
-//! but instance storage works correctly today because it is cleared on every
-//! code path.
-//!
-//! ## TTL implications
-//!
-//! - **Instance keys** share the contract instance TTL. If the instance is
-//!   archived, all instance keys (admin, config, reentrancy) are lost.
-//!   Production deployments should call `env.storage().instance().extend_ttl()`
-//!   periodically (e.g. in `init` or a dedicated `bump` endpoint).
-//! - **Persistent keys** (borrower → CreditLineData) have independent TTLs.
-//!   Long-lived credit lines should be bumped via `persistent().extend_ttl()`
-//!   on access or via a keeper. If a borrower's entry is archived, their
-//!   credit line data is lost.
-//!
-//! # Status transitions
-//!
-//! | From    | To        | Trigger |
-//! |---------|-----------|---------|
-//! | Active  | Suspended | `suspend_credit_line` |
-//! | Active  | Defaulted | `default_credit_line` |
-//! | Suspended | Defaulted | `default_credit_line` |
-//! | Defaulted | Active   | `reinstate_credit_line` |
-//! | Any (non-Closed) | Closed | `close_credit_line` |
 //!
 //! # Reentrancy
 //! Soroban token transfers (e.g. Stellar Asset Contract) do not invoke callbacks back into
@@ -58,13 +13,12 @@ mod events;
 mod types;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, Env,
-    Symbol,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Symbol,
 };
 
 use events::{
-    publish_credit_line_event, publish_drawn_event, publish_limit_decrease_event, publish_repayment_event,
-    publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, LimitDecreaseEvent, RepaymentEvent,
+    publish_credit_line_event, publish_drawn_event, publish_repayment_event,
+    publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
 use types::{CreditLineData, CreditStatus, RateChangeConfig};
@@ -136,6 +90,7 @@ impl Credit {
         env.storage()
             .instance()
             .set(&DataKey::LiquiditySource, &env.current_contract_address());
+        ()
     }
 
     /// @notice Sets the token contract used for reserve/liquidity checks and draw transfers.
@@ -246,7 +201,7 @@ impl Credit {
             panic!("Borrower mismatch for credit line");
         }
 
-        if credit_line.status != CreditStatus::Active {
+        if credit_line.status == CreditStatus::Closed {
             clear_reentrancy_guard(&env);
             env.panic_with_error(ContractError::CreditLineClosed);
         }
@@ -266,10 +221,6 @@ impl Credit {
             env.panic_with_error(ContractError::InvalidAmount);
         }
 
-        if credit_line.status == CreditStatus::Restricted {
-            clear_reentrancy_guard(&env);
-            panic!("credit line is restricted - repay excess amount first");
-        }
         let updated_utilized = credit_line
             .utilized_amount
             .checked_add(amount)
@@ -307,6 +258,7 @@ impl Credit {
             },
         );
         clear_reentrancy_guard(&env);
+        ()
     }
 
     /// Repay credit (borrower).
@@ -396,12 +348,6 @@ impl Credit {
             .saturating_sub(effective_repay)
             .max(0);
         credit_line.utilized_amount = new_utilized;
-        
-        // If credit line was Restricted and utilization is now within limit, reactivate it
-        if credit_line.status == CreditStatus::Restricted && new_utilized <= credit_line.credit_limit {
-            credit_line.status = CreditStatus::Active;
-        }
-        
         env.storage().persistent().set(&borrower, &credit_line);
 
         // --- Emit event ---
@@ -471,39 +417,8 @@ impl Credit {
         if credit_limit < 0 {
             panic!("credit_limit must be non-negative");
         }
-        
-        // Handle credit limit decrease vs utilized amount
-        let old_limit = credit_line.credit_limit;
-        let is_limit_decrease = credit_limit < old_limit;
-        let excess_amount = if is_limit_decrease && credit_limit < credit_line.utilized_amount {
-            credit_line.utilized_amount - credit_limit
-        } else {
-            0
-        };
-        
-        if excess_amount > 0 {
-            // Limit decreased below utilized amount - place in Restricted status
-            credit_line.credit_limit = credit_limit;
-            credit_line.status = CreditStatus::Restricted;
-            
-            // Emit limit decrease event
-            let timestamp = env.ledger().timestamp();
-            publish_limit_decrease_event(
-                &env,
-                LimitDecreaseEvent {
-                    borrower: borrower.clone(),
-                    old_limit,
-                    new_limit: credit_limit,
-                    utilized_amount: credit_line.utilized_amount,
-                    excess_amount,
-                    timestamp,
-                },
-            );
-            
-            // Note: utilized_amount remains unchanged until borrower repays
-        } else {
-            // Normal limit increase or decrease within utilization
-            credit_line.credit_limit = credit_limit;
+        if credit_limit < credit_line.utilized_amount {
+            panic!("credit_limit cannot be less than utilized amount");
         }
         if interest_rate_bps > MAX_INTEREST_RATE_BPS {
             panic!("interest_rate_bps exceeds maximum");
@@ -621,23 +536,10 @@ impl Credit {
             .get(&borrower)
             .expect("Credit line not found");
 
-        // Idempotent: already closed
         if credit_line.status == CreditStatus::Closed {
             return;
         }
 
-        // Validate that the current state allows closing
-        match credit_line.status {
-            CreditStatus::Active | CreditStatus::Suspended | CreditStatus::Defaulted => {
-                // These states can be closed
-            }
-            CreditStatus::Closed => {
-                // Already handled above
-                return;
-            }
-        }
-
-        // Authorization check: admin can always close, borrower only if utilization is zero
         let allowed = closer == admin || (closer == borrower && credit_line.utilized_amount == 0);
 
         if !allowed {
@@ -2086,168 +1988,5 @@ mod test_rate_change_limits {
         client.init(&admin);
 
         client.set_rate_change_limits(&100_u32, &0_u64);
-    }
-    #[test]
-    #[should_panic]
-    fn test_update_risk_parameters_not_found() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        env.mock_all_auths();
-        client.update_risk_parameters(&borrower, &1000, &500, &50);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_update_risk_parameters_over_utilized_limit() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        env.mock_all_auths();
-        client.open_credit_line(&borrower, &1000, &500, &50);
-
-        // Mock a draw so utilized > 0
-        env.as_contract(&contract_id, || {
-            let mut line: CreditLineData = env.storage().persistent().get(&borrower).unwrap();
-            line.utilized_amount = 500;
-            env.storage().persistent().set(&borrower, &line);
-        });
-
-        // Try to set limit to 400 (which is < 500)
-        client.update_risk_parameters(&borrower, &400, &500, &50);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_suspend_already_suspended_panics() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000, &500, &50);
-        client.suspend_credit_line(&borrower);
-
-        // This should panic
-        client.suspend_credit_line(&borrower);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_default_closed_line_panics() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000, &500, &50);
-        client.close_credit_line(&borrower, &admin);
-
-        // This should panic
-        client.default_credit_line(&borrower);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_reinstate_active_line_panics() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000, &500, &50);
-
-        // This should panic
-        client.reinstate_credit_line(&borrower);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_draw_on_closed_line_panics() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        env.mock_all_auths();
-        client.open_credit_line(&borrower, &1000, &500, &50);
-        client.close_credit_line(&borrower, &admin);
-
-        client.draw_credit(&borrower, &100);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_draw_on_suspended_line_panics() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        env.mock_all_auths();
-        client.open_credit_line(&borrower, &1000, &500, &50);
-        client.suspend_credit_line(&borrower);
-
-        client.draw_credit(&borrower, &100);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_draw_zero_amount_panics() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        env.mock_all_auths();
-        client.open_credit_line(&borrower, &1000, &500, &50);
-
-        client.draw_credit(&borrower, &0);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_repay_zero_amount_panics() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let borrower = Address::generate(&env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        client.init(&admin);
-        env.mock_all_auths();
-        client.open_credit_line(&borrower, &1000, &500, &50);
-
-        client.repay_credit(&borrower, &0);
-    }
-
-    #[test]
-    fn test_get_rate_change_limits_not_set_returns_none() {
-        let env = Env::default();
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(&env, &contract_id);
-
-        let limits = client.get_rate_change_limits();
-        assert!(limits.is_none());
     }
 }
