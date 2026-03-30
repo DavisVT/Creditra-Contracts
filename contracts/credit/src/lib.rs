@@ -691,59 +691,12 @@ impl Credit {
 
 #[cfg(test)]
 mod test {
-    /// Helper to set up a contract, open a credit line, and return (client, token, admin)
-    fn setup_contract_with_credit_line<'a>(
-        env: &'a Env,
-        borrower: &'a Address,
-        credit_limit: i128,
-        utilized_amount: i128,
-    ) -> (CreditClient<'a>, Address, Address) {
-        env.mock_all_auths();
-        let admin = Address::generate(env);
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(env, &contract_id);
-        client.init(&admin);
-        client.open_credit_line(borrower, &credit_limit, &300_u32, &70_u32);
-        if utilized_amount > 0 {
-            client.draw_credit(borrower, &utilized_amount);
-        }
-        (client, contract_id, admin)
-    }
     use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Events as _;
     use soroban_sdk::token;
     use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::{Symbol, TryFromVal, TryIntoVal};
-
-    fn setup_test(env: &Env) -> (Address, Address, Address) {
-        env.mock_all_auths();
-
-        let admin = Address::generate(env);
-        let borrower = Address::generate(env);
-
-        let contract_id = env.register(Credit, ());
-        let client = CreditClient::new(env, &contract_id);
-
-        client.init(&admin);
-        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-
-        (admin, borrower, contract_id)
-    }
-
-    fn call_contract<F>(env: &Env, contract_id: &Address, f: F)
-    where
-        F: FnOnce(),
-    {
-        env.as_contract(contract_id, f);
-    }
-
-    fn get_credit_data(env: &Env, contract_id: &Address, borrower: &Address) -> CreditLineData {
-        let client = CreditClient::new(env, contract_id);
-        client
-            .get_credit_line(borrower)
-            .expect("Credit line not found")
-    }
 
     /// Set up a contract with a token, mint reserve liquidity, open a credit line,
     /// and optionally draw. Returns (client, token_address, contract_id, admin).
@@ -1263,7 +1216,7 @@ mod test {
 #[cfg(test)]
 mod test_smoke_coverage {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 
     #[test]
@@ -1566,10 +1519,7 @@ mod test_coverage_gaps {
         use soroban_sdk::{TryFromVal, TryIntoVal};
         let env = Env::default();
         env.mock_all_auths();
-        let borrower = Address::generate(&env);
-        let (client, _admin, _borrower2) = base_setup(&env);
-        // use the borrower from base_setup
-        let borrower = _borrower2;
+        let (client, _admin, borrower) = base_setup(&env);
         client.default_credit_line(&borrower);
         client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         let events = env.events().all();
@@ -1803,7 +1753,7 @@ mod test_coverage_gaps {
         let token_admin = Address::generate(&env);
 
         let contract_id = env.register(Credit, ());
-        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env));
+        let _token_id = env.register_stellar_asset_contract_v2(Address::generate(&env));
         let client = CreditClient::new(&env, &contract_id);
 
         client.init(&admin);
