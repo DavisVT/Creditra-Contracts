@@ -23,6 +23,8 @@ Stored in persistent storage keyed by the borrower's address.
 | `risk_score`         | `u32`    | Risk score assigned by the risk engine (0–100) |
 | `status`             | `CreditStatus` | Current status of the credit line |
 | `last_rate_update_ts`| `u64`    | Ledger timestamp of the last interest-rate change (0 = never updated) |
+| `accrued_interest`   | `i128`   | Cumulative capitalized interest recorded on the line |
+| `last_accrual_ts`    | `u64`    | Ledger timestamp of the last interest accrual checkpoint (0 = never accrued) |
 
 ### `RateChangeConfig`
 Stored in instance storage under the `"rate_cfg"` key. Optional — when absent, no rate-change limits are enforced.
@@ -40,16 +42,19 @@ Stored in instance storage under the `"rate_cfg"` key. Optional — when absent,
 | `Suspended`| 1     | Credit line is temporarily suspended |
 | `Defaulted`| 2     | Borrower has defaulted; draw disabled, repay allowed |
 | `Closed`   | 3     | Credit line has been permanently closed |
+| `Restricted` | 4   | Limit is below utilization; additional draws are blocked until cured |
 
 ### Status transitions
 
 | From       | To         | Trigger |
 |------------|------------|---------|
+| Active     | Suspended  | Admin calls `suspend_credit_line` |
 | Active     | Defaulted  | Admin calls `default_credit_line` |
 | Suspended  | Defaulted  | Admin calls `default_credit_line` |
 | Defaulted  | Active     | Admin calls `reinstate_credit_line` |
-| Defaulted  | Suspended  | Admin calls `suspend_credit_line` |
 | Defaulted  | Closed     | Admin or borrower (when `utilized_amount == 0`) calls `close_credit_line` |
+| Active     | Closed     | Admin or borrower (when `utilized_amount == 0`) calls `close_credit_line` |
+| Suspended  | Closed     | Admin or borrower (when `utilized_amount == 0`) calls `close_credit_line` |
 
 When status is **Defaulted**: `draw_credit` is disabled; `repay_credit` is still allowed.
 
@@ -60,8 +65,32 @@ When status is **Defaulted**: `draw_credit` is disabled; `repay_credit` is still
 ### `init(env, admin)`
 Initializes the contract with an admin address. Must be called exactly once.
 
+- Stores `admin` in instance storage under the `"admin"` key.
+- Sets `LiquiditySource` to the contract's own address as a deterministic default.
+- Reverts with `ContractError::AlreadyInitialized` (14) if called a second time, preventing admin takeover via re-initialization.
+
+#### Parameters
+| Parameter | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Address that will hold admin authority over this contract |
+
+#### Errors
+| Condition | Error |
+|---|---|
+| Contract already initialized | `ContractError::AlreadyInitialized` (14) |
+
+#### Security notes
+- Must be called by the deployer immediately after deployment.
+- The guard checks for the presence of the `"admin"` key before writing; no storage is mutated on a rejected second call.
+- The admin address is immutable after initialization. See the Admin Rotation Proposal section for a safe rotation design.
+- `LiquiditySource` defaults to the contract address and can be updated post-init via `set_liquidity_source` (admin only).
+
 ### `set_liquidity_token(env, token_address)`
 Sets the Stellar Asset Contract token used for draws and repayments (admin only).
+
+- Writes the token contract address to instance storage under `DataKey::LiquidityToken`.
+- Only the configured admin may update this value; unauthorized callers fail auth before storage is mutated.
+- Covered by unit tests in `contracts/credit/src/lib.rs` for both successful admin updates and rejected non-admin calls.
 
 ### `set_liquidity_source(env, reserve_address)`
 Sets the address that holds liquidity for draws and receives repayments (defaults to contract address).
@@ -76,7 +105,7 @@ Opens a new credit line for a borrower. Called by the backend or risk engine.
 | `interest_rate_bps` | `u32` | Annual interest rate in basis points (0–10000) |
 | `risk_score` | `u32` | Risk score from the risk engine (0–100) |
 
-`last_rate_update_ts` is initialized to `0` (no rate update has occurred yet).
+`last_rate_update_ts`, `accrued_interest`, and `last_accrual_ts` are initialized to `0`.
 
 #### Errors
 | Condition | Error |
@@ -204,7 +233,16 @@ Emits: `RiskParametersUpdatedEvent` with borrower, new credit limit, new rate, n
 ### `suspend_credit_line(env, borrower)`
 Suspend an Active credit line (admin only).
 
+- Reverts if the line does not exist.
+- Reverts unless the current status is `Active`.
+
 Emits: `("credit", "suspend")` event.
+
+### Interest accrual
+
+Interest accrual fields exist in storage, but scheduled/lazy accrual logic is not yet active in the contract.
+
+The intended implementation design is documented separately in [`docs/interest-accrual.md`](interest-accrual.md).
 
 ### `close_credit_line(env, borrower, closer)`
 Close a credit line.
@@ -231,11 +269,18 @@ View function — returns credit line data or `None`.
 
 ## Overflow Policy
 
-Arithmetic paths that affect credit limit and utilization use checked math.
+Arithmetic paths that affect credit limit and utilization stay in integer-only arithmetic.
 
 - `draw_credit`: utilization update uses `checked_add`; arithmetic overflow reverts with `ContractError::Overflow` (`12`).
-- `repay_credit`: applied repayment is capped to current utilization, then utilization update uses `checked_sub`; arithmetic overflow reverts with `ContractError::Overflow` (`12`).
+- `repay_credit`: inputs must be positive integers; the contract computes `effective_repay = min(amount, utilized_amount)` and then applies an integer floor at zero with `saturating_sub`. This keeps utilization non-negative even for over-repayments.
 - `update_risk_parameters`: limit/risk bounds are validated before state updates; rate delta uses `abs_diff` for overflow-safe unsigned distance checks.
+
+### Integer arithmetic assumptions
+
+- Amounts and limits are stored as whole-number `i128` values; there is no fractional accounting or rounding path inside the contract.
+- `open_credit_line` requires a positive limit, and `draw_credit` / `repay_credit` both reject non-positive amounts at the contract boundary.
+- Because `repay_credit` caps the applied amount to current utilization before subtraction, repayment paths preserve the invariant `0 <= utilized_amount`.
+- While a line is `Active`, draw paths also preserve `utilized_amount <= credit_limit`; dedicated invariant tests cover repeated draw and repay sequences across status changes.
 
 ### Large-number test coverage
 
@@ -245,6 +290,8 @@ The contract test suite includes explicit large-value coverage:
 - `test_draw_credit_overflow_reverts_with_defined_error`
 - `test_draw_credit_large_values_exceed_limit_reverts_with_defined_error`
 - `test_repay_credit_large_amount_caps_at_zero_without_underflow`
+- `utilization_stays_bounded_across_active_scenarios`
+- `utilization_never_goes_negative_after_repays_across_statuses`
 - `test_update_risk_parameters_rejects_limit_below_utilized_near_i128_max`
 
 These tests validate behavior near `i128::MAX` and confirm overflow handling remains deterministic.
@@ -269,6 +316,8 @@ The `Credit` contract uses standard `u32` discriminants for standardized error h
 | `10`       | `UtilizationNotZero` | Action cannot be performed because the credit line utilization is not zero. |
 | `11`       | `Reentrancy`         | Reentrancy detected during cross-contract calls.                            |
 | `12`       | `Overflow`           | Math overflow occurred during calculation.                                  |
+| `13`       | `LimitDecreaseRequiresRepayment` | Credit limit decrease requires immediate repayment of excess amount. |
+| `14`       | `AlreadyInitialized` | Contract has already been initialized; `init` may only be called once.      |
 
 ---
 
@@ -432,16 +481,390 @@ All sensitive functions enforce authorization via `require_auth()`.
 
 | Key                  | Type       | Value                     |
 |----------------------|------------|---------------------------|
-| `"admin"`            | Instance   | Admin `Address`           |
+| `"admin"`            | Instance   | Admin `Address` (written once; re-init reverts) |
 | `borrower: Address`  | Persistent | `CreditLineData`          |
 | `"rate_cfg"`         | Instance   | `RateChangeConfig` (optional) |
 | `"reentrancy"`       | Instance   | Reentrancy guard (internal) |
+| `DataKey::LiquiditySource` | Instance | Reserve `Address` (defaults to contract address) |
+| `DataKey::LiquidityToken`  | Instance | Token `Address` (optional) |
 
 ---
 
-## Deployment and CLI Usage
+## Deployment Playbook
 
-(Examples unchanged — still valid)
+This section covers deploying the credit contract to Stellar testnet and invoking its core methods. All examples use the [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli) (`stellar`).
+
+### Prerequisites
+
+- Rust with `wasm32-unknown-unknown` target: `rustup target add wasm32-unknown-unknown`
+- Stellar CLI installed: `cargo install --locked stellar-cli --features opt`
+- A funded testnet identity (never commit private keys)
+
+### 1. Identity setup
+
+```bash
+# Generate a new keypair and store it locally under an alias
+stellar keys generate --global admin --network testnet
+
+# Fund it via Friendbot
+stellar keys fund admin --network testnet
+
+# Confirm the address
+stellar keys address admin
+```
+
+For the backend/risk-engine identity used to open credit lines:
+
+This section provides step-by-step instructions to deploy the contract on Stellar testnet,
+initialize it, configure liquidity, and invoke core methods.
+
+### Prerequisites
+
+- **Rust 1.75+** with `wasm32-unknown-unknown` target installed
+- **Stellar Soroban CLI** v21.0.0+: [install guide](https://developers.stellar.org/docs/tools-and-sdks/cli/install-soroban-cli)
+- **soroban-cli configured network**: add testnet or futurenet if not present
+- **Account on testnet**: funded with XLM for gas and operations
+
+### Step 1: Network and Identity Setup
+
+#### Configure Stellar Testnet
+
+```bash
+soroban network add --name testnet --rpc-url https://soroban-testnet.stellar.org:443 --network-passphrase "Test SDF Network ; September 2015"
+```
+
+#### Create or Import an Identity
+
+```bash
+# Generate a new identity (stores keypair in ~/.config/soroban/keys/)
+soroban keys generate admin --network testnet
+
+# Or import an existing keypair
+soroban keys generate admin --secret-key --network testnet
+# Then paste your secret key (starts with S...)
+```
+
+Verify the identity was created:
+
+```bash
+soroban keys ls
+```
+
+Fund the identity's address on testnet:
+1. Get the public key: `soroban keys show admin`
+2. Visit [Stellar Testnet Friendbot](https://friendbot.stellar.org/) and fund the address
+3. Wait for the transaction to confirm (~5 seconds)
+
+### Step 2: Build the Contract
+
+```bash
+# Build release WASM (optimized for size and deployment)
+rustup target add wasm32-unknown-unknown
+cargo build --release --target wasm32-unknown-unknown -p creditra-credit
+```
+
+The compiled WASM is at: `target/wasm32-unknown-unknown/release/creditra_credit.wasm`
+
+### Step 3: Deploy the Contract
+
+```bash
+# Deploy to testnet
+CONTRACT_ID=$(soroban contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/creditra_credit.wasm \
+  --source admin \
+  --network testnet)
+
+echo "Contract deployed at: $CONTRACT_ID"
+```
+
+Save the `CONTRACT_ID` in an environment variable for subsequent commands.
+
+### Step 4: Initialize the Contract
+
+```bash
+# Get the admin identity's public key
+ADMIN_PUBKEY=$(soroban keys show admin)
+
+# Initialize with admin
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- init --admin $ADMIN_PUBKEY
+```
+
+This sets the admin address and defaults the liquidity source to the contract address.
+
+### Step 5: Configure Liquidity Token and Source
+
+#### (Optional) Create a Test Liquidity Token
+
+If deploying a mock token for testing:
+
+```bash
+# Deploy a Stellar Asset Contract for USDC (testnet)
+USDC_CONTRACT=$(soroban contract deploy native \
+  --network testnet \
+  --source admin)
+
+echo "USDC contract at: $USDC_CONTRACT"
+```
+
+#### Set Liquidity Token
+
+```bash
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- set_liquidity_token --token_address $USDC_CONTRACT
+```
+
+#### Set Liquidity Source (Reserve Account)
+
+The liquidity source is where reserve tokens are held. It can be the contract address,
+an external reserve account, or another contract.
+
+```bash
+# Option A: Keep contract as reserve (already set in init)
+# No additional action needed
+
+# Option B: Set a different reserve account
+RESERVE_PUBKEY=$(soroban keys show reserve)
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- set_liquidity_source --reserve_address $RESERVE_PUBKEY
+```
+
+### Step 6: Open a Credit Line
+
+Create a credit line for a borrower. This is typically called by the backend/risk engine.
+
+```bash
+# Generate or use an existing borrower identity
+soroban keys generate borrower --network testnet
+BORROWER_PUBKEY=$(soroban keys show borrower)
+
+# Open a credit line
+# - borrower: the borrower address
+# - credit_limit: 10000 (in smallest token unit, typically microunits)
+# - interest_rate_bps: 300 (3% annual interest)
+# - risk_score: 75 (out of 100)
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- open_credit_line \
+    --borrower $BORROWER_PUBKEY \
+    --credit_limit 10000 \
+    --interest_rate_bps 300 \
+    --risk_score 75
+```
+
+Verify the credit line was created:
+
+```bash
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- get_credit_line --borrower $BORROWER_PUBKEY
+```
+
+### Step 7: Fund the Liquidity Reserve
+
+If using a liquidity token, the reserve account must hold sufficient balance for draws.
+
+```bash
+# If USDC contract is the token, fund the reserve
+# This example assumes the contract is the reserve
+soroban contract invoke \
+  --id $USDC_CONTRACT \
+  --source admin \
+  --network testnet \
+  -- mint --to $CONTRACT_ID --amount 50000
+
+# Verify reserve balance
+soroban contract invoke \
+  --id $USDC_CONTRACT \
+  --source admin \
+  --network testnet \
+  -- balance --id $CONTRACT_ID
+```
+
+### Step 8: Draw Credit
+
+A borrower draws against their credit line. This transfers tokens from the reserve to the borrower.
+
+```bash
+# Borrower draws 1000 units
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source borrower \
+  --network testnet \
+  -- draw_credit \
+    --borrower $BORROWER_PUBKEY \
+    --amount 1000
+```
+
+Verify the draw:
+
+```bash
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- get_credit_line --borrower $BORROWER_PUBKEY
+```
+
+Expected result: `utilized_amount` should now be 1000.
+
+### Step 9: Repay Credit
+
+Borrowers repay their drawn amount. The tokens are transferred back to the liquidity source.
+
+#### Prerequisite: Approve Token Transfer
+
+The borrower must approve the contract to transfer tokens on their behalf.
+
+```bash
+# Borrower approves the contract to transfer up to 2000 units
+soroban contract invoke \
+  --id $USDC_CONTRACT \
+  --source borrower \
+  --network testnet \
+  -- approve \
+    --from $BORROWER_PUBKEY \
+    --spender $CONTRACT_ID \
+    --amount 2000 \
+    --expiration_ledger 1000000
+```
+
+#### Execute Repayment
+
+```bash
+# Borrower repays 500 units
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source borrower \
+  --network testnet \
+  -- repay_credit \
+    --borrower $BORROWER_PUBKEY \
+    --amount 500
+```
+
+Verify the repayment:
+
+```bash
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- get_credit_line --borrower $BORROWER_PUBKEY
+```
+
+Expected result: `utilized_amount` should now be 500.
+
+### Step 10: Update Risk Parameters (Admin Only)
+
+The admin can adjust credit limits, interest rates, and risk scores.
+
+```bash
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- update_risk_parameters \
+    --borrower $BORROWER_PUBKEY \
+    --credit_limit 20000 \
+    --interest_rate_bps 400 \
+    --risk_score 85
+```
+
+### Step 11: Manage Credit Line Status
+
+#### Suspend a Credit Line
+
+Prevent draws while allowing repayment.
+
+```bash
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- suspend_credit_line --borrower $BORROWER_PUBKEY
+```
+
+#### Default a Credit Line
+
+Mark the borrower as in default (blocks draws, allows repayment).
+
+```bash
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- default_credit_line --borrower $BORROWER_PUBKEY
+```
+
+#### Close a Credit Line
+
+- **Admin**: can force-close at any time
+- **Borrower**: can only close when `utilized_amount` is 0
+
+```bash
+# Admin force-close
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- close_credit_line \
+    --borrower $BORROWER_PUBKEY \
+    --closer $ADMIN_PUBKEY
+
+# Or borrower self-close (only when fully repaid)
+soroban contract invoke \
+  --id $CONTRACT_ID \
+  --source borrower \
+  --network testnet \
+  -- close_credit_line \
+    --borrower $BORROWER_PUBKEY \
+    --closer $BORROWER_PUBKEY
+```
+
+### Useful Quick Reference
+
+**Export identities to variables for scripting:**
+
+```bash
+ADMIN=$(soroban keys show admin)
+BORROWER=$(soroban keys show borrower)
+RESERVE=$(soroban keys show reserve)
+TOKEN=$USDC_CONTRACT
+CONTRACT=$CONTRACT_ID
+```
+
+**Query contract state:**
+
+```bash
+# Check a specific credit line
+soroban contract invoke --id $CONTRACT --source admin --network testnet -- get_credit_line --borrower $BORROWER
+
+# Check token balance
+soroban contract invoke --id $TOKEN --source admin --network testnet -- balance --id $CONTRACT
+```
+
+**Troubleshooting common errors:**
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `HostError: Error(Auth, InvalidAction)` | Identity not authorized | Ensure `--source` identity is loaded and has been funded |
+| `HostError: Value(ContractError(1))` | Credit line not found | Verify credit line was opened with correct borrower address |
+| `HostError: Error(Contract, InvalidContractData)` | Contract ID invalid or contract not deployed | Check `$CONTRACT_ID` and verify deployment succeeded |
+| `Insufficient liquidity reserve` | Reserve balance too low | Fund the reserve with more tokens via `mint` or transfer |
+| `Insufficient allowance` | Token approval too low | Increase borrower's approval via token `approve` |
 
 ---
 
@@ -463,7 +886,7 @@ these keys are lost. Production deployments should call
 
 | Key | Rust type | Value type | Written by | Notes |
 |-----|-----------|------------|------------|-------|
-| `Symbol("admin")` | `Symbol` | `Address` | `init` | Contract admin. Exactly one per deployment. |
+| `Symbol("admin")` | `Symbol` | `Address` | `init` | Contract admin. Written exactly once; second write reverts with `AlreadyInitialized`. |
 | `DataKey::LiquidityToken` | `DataKey` | `Address` | `set_liquidity_token` | Token contract for reserve/draw transfers. |
 | `DataKey::LiquiditySource` | `DataKey` | `Address` | `init`, `set_liquidity_source` | Reserve address. Defaults to contract address. |
 | `Symbol("reentrancy")` | `Symbol` | `bool` | `set_reentrancy_guard`, `clear_reentrancy_guard` | Defense-in-depth flag. Cleared on every code path. |
