@@ -1188,7 +1188,7 @@ mod test_smoke_coverage {
 
         client.suspend_credit_line(&borrower);
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
 
         sac.mint(&borrower, &100_i128);
         TokenClient::new(&env, &token_address).approve(
@@ -1580,7 +1580,7 @@ mod test_coverage_gaps {
         let env = Env::default();
         let (client, _admin, borrower) = base_setup(&env);
         // Line is Active, not Defaulted
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
     }
 
     #[test]
@@ -1590,7 +1590,7 @@ mod test_coverage_gaps {
         let (client, _admin, borrower) = base_setup(&env);
         client.suspend_credit_line(&borrower);
         // Line is Suspended, not Defaulted
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
     }
 
     // ── open_credit_line: allows reopening after Closed status ───────────────
@@ -1618,10 +1618,9 @@ mod test_coverage_gaps {
         use soroban_sdk::testutils::Events;
         let env = Env::default();
         env.mock_all_auths();
-        let borrower = Address::generate(&env);
-        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _admin, borrower) = base_setup(&env);
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         let events = env.events().all();
         let (_contract, topics, data) = events.last().unwrap();
         assert_eq!(
@@ -1650,7 +1649,7 @@ mod test_coverage_gaps {
         client.repay_credit(&borrower, &50_i128);
         client.suspend_credit_line(&borrower);
         client.default_credit_line(&borrower);
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         client.close_credit_line(&borrower, &admin);
 
         let events = env.events().all();
@@ -1810,11 +1809,8 @@ mod test_coverage_gaps {
 
         let admin = Address::generate(&env);
         let borrower = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-
         let contract_id = env.register(Credit, ());
         let client = CreditClient::new(&env, &contract_id);
-
         client.init(&admin);
         client.open_credit_line(&borrower, &1_000_i128, &300_u32, &70_u32);
 
