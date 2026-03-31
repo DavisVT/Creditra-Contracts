@@ -88,6 +88,10 @@ Initializes the contract with an admin address. Must be called exactly once.
 ### `set_liquidity_token(env, token_address)`
 Sets the Stellar Asset Contract token used for draws and repayments (admin only).
 
+- Writes the token contract address to instance storage under `DataKey::LiquidityToken`.
+- Only the configured admin may update this value; unauthorized callers fail auth before storage is mutated.
+- Covered by unit tests in `contracts/credit/src/lib.rs` for both successful admin updates and rejected non-admin calls.
+
 ### `set_liquidity_source(env, reserve_address)`
 Sets the address that holds liquidity for draws and receives repayments (defaults to contract address).
 
@@ -265,11 +269,18 @@ View function — returns credit line data or `None`.
 
 ## Overflow Policy
 
-Arithmetic paths that affect credit limit and utilization use checked math.
+Arithmetic paths that affect credit limit and utilization stay in integer-only arithmetic.
 
 - `draw_credit`: utilization update uses `checked_add`; arithmetic overflow reverts with `ContractError::Overflow` (`12`).
-- `repay_credit`: applied repayment is capped to current utilization, then utilization update uses `checked_sub`; arithmetic overflow reverts with `ContractError::Overflow` (`12`).
+- `repay_credit`: inputs must be positive integers; the contract computes `effective_repay = min(amount, utilized_amount)` and then applies an integer floor at zero with `saturating_sub`. This keeps utilization non-negative even for over-repayments.
 - `update_risk_parameters`: limit/risk bounds are validated before state updates; rate delta uses `abs_diff` for overflow-safe unsigned distance checks.
+
+### Integer arithmetic assumptions
+
+- Amounts and limits are stored as whole-number `i128` values; there is no fractional accounting or rounding path inside the contract.
+- `open_credit_line` requires a positive limit, and `draw_credit` / `repay_credit` both reject non-positive amounts at the contract boundary.
+- Because `repay_credit` caps the applied amount to current utilization before subtraction, repayment paths preserve the invariant `0 <= utilized_amount`.
+- While a line is `Active`, draw paths also preserve `utilized_amount <= credit_limit`; dedicated invariant tests cover repeated draw and repay sequences across status changes.
 
 ### Large-number test coverage
 
@@ -279,6 +290,8 @@ The contract test suite includes explicit large-value coverage:
 - `test_draw_credit_overflow_reverts_with_defined_error`
 - `test_draw_credit_large_values_exceed_limit_reverts_with_defined_error`
 - `test_repay_credit_large_amount_caps_at_zero_without_underflow`
+- `utilization_stays_bounded_across_active_scenarios`
+- `utilization_never_goes_negative_after_repays_across_statuses`
 - `test_update_risk_parameters_rejects_limit_below_utilized_near_i128_max`
 
 These tests validate behavior near `i128::MAX` and confirm overflow handling remains deterministic.
@@ -477,7 +490,30 @@ All sensitive functions enforce authorization via `require_auth()`.
 
 ---
 
-## Deployment and Invocation Playbook
+## Deployment Playbook
+
+This section covers deploying the credit contract to Stellar testnet and invoking its core methods. All examples use the [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli) (`stellar`).
+
+### Prerequisites
+
+- Rust with `wasm32-unknown-unknown` target: `rustup target add wasm32-unknown-unknown`
+- Stellar CLI installed: `cargo install --locked stellar-cli --features opt`
+- A funded testnet identity (never commit private keys)
+
+### 1. Identity setup
+
+```bash
+# Generate a new keypair and store it locally under an alias
+stellar keys generate --global admin --network testnet
+
+# Fund it via Friendbot
+stellar keys fund admin --network testnet
+
+# Confirm the address
+stellar keys address admin
+```
+
+For the backend/risk-engine identity used to open credit lines:
 
 This section provides step-by-step instructions to deploy the contract on Stellar testnet,
 initialize it, configure liquidity, and invoke core methods.
