@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use soroban_sdk::{Env};
+use soroban_sdk::{Address, Env};
 use crate::types::{CreditLineData};
 use crate::events::{publish_interest_accrued_event, InterestAccruedEvent};
 
@@ -74,4 +74,17 @@ pub fn apply_accrual(env: &Env, mut line: CreditLineData) -> CreditLineData {
 
     line.last_accrual_ts = now;
     line
+}
+
+/// Load a credit line, apply accrual, and persist the result.
+/// No-op if the credit line does not exist.
+pub fn apply_pending_accrual(env: &Env, borrower: &Address) {
+    if let Some(line) = env
+        .storage()
+        .persistent()
+        .get::<Address, CreditLineData>(borrower)
+    {
+        let updated = apply_accrual(env, line);
+        env.storage().persistent().set(borrower, &updated);
+    }
 }

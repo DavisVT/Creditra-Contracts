@@ -10,6 +10,9 @@
 //! defense-in-depth measure; if a token or future integration ever called back, the guard
 //! would revert.
 
+mod accrual;
+#[cfg(test)]
+mod accrual_tests;
 mod auth;
 mod borrow;
 mod config;
@@ -18,25 +21,29 @@ mod lifecycle;
 mod risk;
 mod storage;
 pub mod types;
-mod borrow;
-mod accrual;
-#[cfg(test)]
-mod accrual_tests;
 
 use soroban_sdk::{
     contract, contractimpl, symbol_short, token, Address, Env, Symbol,
 };
 
 use crate::events::{
+    publish_admin_rotation_accepted, publish_admin_rotation_proposed,
     publish_credit_line_event, publish_drawn_event, publish_interest_accrued_event,
-    publish_repayment_event, CreditLineEvent, DrawnEvent, InterestAccruedEvent,
-    RepaymentEvent,
+    publish_repayment_event, AdminRotationAcceptedEvent, AdminRotationProposedEvent,
+    CreditLineEvent, DrawnEvent, InterestAccruedEvent, RepaymentEvent,
 };
 use types::{ContractError, CreditLineData, CreditStatus, RateChangeConfig};
-use auth::require_admin_auth;
-use storage::{clear_reentrancy_guard, set_reentrancy_guard, rate_cfg_key, DataKey};
+pub use types::ContractVersion;
+use auth::{require_admin, require_admin_auth};
+use risk::{MAX_INTEREST_RATE_BPS, MAX_RISK_SCORE};
+use storage::{
+    clear_reentrancy_guard, is_borrower_blocked, proposed_admin_key, proposed_at_key,
+    rate_cfg_key, set_reentrancy_guard, DataKey,
+};
 
-// constants removed - imported from risk module
+/// Contract API version (major, minor, patch).
+/// Increment major on breaking ABI/storage changes, minor on additive features, patch on fixes.
+pub const CONTRACT_API_VERSION: (u32, u32, u32) = (1, 0, 0);
 
 /// Seconds in a standard year (365 days).
 const SECONDS_PER_YEAR: u64 = 31_536_000;
@@ -392,7 +399,7 @@ impl Credit {
 
         // --- Accrue pending interest before applying repayment ---
         // This ensures interest cannot be skipped or evaded through frequent repayments.
-        apply_pending_accrual(&env, &borrower);
+        accrual::apply_pending_accrual(&env, &borrower);
 
         // Reload credit line after potential accrual mutation
         credit_line = env
@@ -457,12 +464,15 @@ impl Credit {
         // Repayment applies to interest first, then to principal.
         // utilized_amount includes both principal and accrued_interest.
         let interest_to_pay = effective_repay.min(credit_line.accrued_interest);
+        let interest_repaid = interest_to_pay;
+        let principal_repaid = effective_repay - interest_to_pay;
         credit_line.accrued_interest = credit_line.accrued_interest.checked_sub(interest_to_pay).unwrap_or(0);
-        
+
         let new_utilized = credit_line
             .utilized_amount
             .saturating_sub(effective_repay)
             .max(0);
+        credit_line.utilized_amount = new_utilized;
 
         env.storage().persistent().set(&borrower, &credit_line);
 
@@ -590,6 +600,18 @@ impl Credit {
     /// Get credit line data for a borrower (view function).
     pub fn get_credit_line(env: Env, borrower: Address) -> Option<CreditLineData> {
         env.storage().persistent().get(&borrower)
+    }
+
+    /// Returns the contract's API version as a structured semver value.
+    ///
+    /// Integrators should check `major` for breaking changes.
+    /// This value is baked into the compiled binary; it does not read from storage.
+    pub fn get_contract_version(_env: Env) -> ContractVersion {
+        ContractVersion {
+            major: CONTRACT_API_VERSION.0,
+            minor: CONTRACT_API_VERSION.1,
+            patch: CONTRACT_API_VERSION.2,
+        }
     }
 }
 

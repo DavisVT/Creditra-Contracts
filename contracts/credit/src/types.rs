@@ -53,7 +53,12 @@ pub enum ContractError {
     LimitDecreaseRequiresRepayment = 13,
     /// Contract has already been initialized; `init` may only be called once.
     AlreadyInitialized = 14,
-    DrawExceedsMaxAmount = 14, 
+    /// Per-transaction draw cap exceeded.
+    DrawExceedsMaxAmount = 15,
+    /// Admin acceptance attempted before the required delay has elapsed.
+    AdminAcceptTooEarly = 16,
+    /// Borrower is blocked from drawing credit.
+    BorrowerBlocked = 17,
 }
 
 /// Stored credit line data for a borrower.
@@ -118,4 +123,16 @@ pub struct RateFormulaConfig {
     pub min_rate_bps: u32,
     /// Maximum allowed computed rate (ceiling), must be <= 10_000.
     pub max_rate_bps: u32,
+}
+
+/// Structured representation of the contract's API version (semver).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContractVersion {
+    /// Incremented on breaking ABI or storage layout changes.
+    pub major: u32,
+    /// Incremented on backward-compatible feature additions.
+    pub minor: u32,
+    /// Incremented on backward-compatible bug fixes.
+    pub patch: u32,
 }

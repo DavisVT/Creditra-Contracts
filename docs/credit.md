@@ -297,6 +297,41 @@ Emits: `("credit", "reinstate")` event.
 ### `get_credit_line(env, borrower) -> Option<CreditLineData>`
 View function — returns credit line data or `None`.
 
+### `get_contract_version(env) -> ContractVersion`
+View function — returns the contract's API version as a `ContractVersion { major, minor, patch }` struct.
+
+Use this to let off-chain clients (wallets, indexers, integration services) detect the deployed contract's API surface without introspecting code or storage.
+
+#### Return type
+
+| Field   | Type  | Description |
+|---------|-------|-------------|
+| `major` | `u32` | Incremented on breaking ABI / storage layout changes |
+| `minor` | `u32` | Incremented on additive, backward-compatible changes |
+| `patch` | `u32` | Incremented on internal fixes with no API impact |
+
+The underlying source of truth is the crate-level constant `CONTRACT_API_VERSION: (u32, u32, u32)` in `contracts/credit/src/lib.rs`. The query is read-only, requires no authorization, and reads no storage — it is safe to poll.
+
+#### Current value
+
+`(1, 0, 0)` — the initial stable release.
+
+#### Versioning policy
+
+- **Major bump** — any change that breaks existing integrations: removing or renaming a contract method, changing a method's argument types or return type, removing or renumbering an `Event`, renumbering a `ContractError` variant, or changing a persistent storage key layout.
+- **Minor bump** — adding a new method, a new event variant, a new error code at a fresh discriminant, or a new optional field on a versioned event struct.
+- **Patch bump** — internal behavior fixes that do not alter the ABI, event schema, error codes, or storage layout.
+
+Integrators should treat the tuple as the canonical compatibility signal: compare `major` for hard compatibility gates and use `minor` / `patch` for feature detection and observability.
+
+#### Example (TypeScript client)
+
+```ts
+const v = await client.getContractVersion();
+if (v.major !== 1) throw new Error(`unsupported credit contract major: ${v.major}`);
+logger.info({ version: `${v.major}.${v.minor}.${v.patch}` }, 'credit contract version');
+```
+
 ---
 
 ## Overflow Policy

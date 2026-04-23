@@ -1,10 +1,14 @@
 use crate::auth::require_admin_auth;
-use crate::events::{
-    publish_rate_formula_config_event, publish_risk_parameters_updated,
-    RateFormulaConfigEvent, RiskParametersUpdatedEvent,
-};
+use crate::events::{publish_risk_parameters_updated, RiskParametersUpdatedEvent};
 use crate::storage::{rate_cfg_key, rate_formula_key};
 use crate::types::{CreditLineData, RateChangeConfig, RateFormulaConfig};
+
+/// Return the stored rate formula config, or None if unset.
+pub fn get_rate_formula_config(env: Env) -> Option<RateFormulaConfig> {
+    env.storage()
+        .instance()
+        .get::<_, RateFormulaConfig>(&rate_formula_key(&env))
+}
 use soroban_sdk::{Address, Env};
 
 /// Maximum interest rate in basis points (100%).
