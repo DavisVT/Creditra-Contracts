@@ -232,3 +232,41 @@ pub fn publish_borrower_blocked_event(env: &Env, event: BorrowerBlockedEvent) {
     env.events()
         .publish((symbol_short!("credit"), topic), event);
 }
+
+/// Publish an admin rotation proposed event.
+pub fn publish_admin_rotation_proposed(env: &Env, event: AdminRotationProposedEvent) {
+    env.events().publish(
+        (symbol_short!("credit"), Symbol::new(env, "adm_prop")),
+        event,
+    );
+}
+
+/// Publish an admin rotation accepted event.
+pub fn publish_admin_rotation_accepted(env: &Env, event: AdminRotationAcceptedEvent) {
+    env.events().publish(
+        (symbol_short!("credit"), Symbol::new(env, "adm_acc")),
+        event,
+    );
+}
+
+/// Event emitted when the rate formula configuration is updated.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateFormulaConfigEvent {
+    /// Base rate in basis points.
+    pub base_rate_bps: u32,
+    /// Slope in basis points per risk score unit.
+    pub slope_bps_per_score: u32,
+    /// Minimum rate in basis points.
+    pub min_rate_bps: u32,
+    /// Maximum rate in basis points.
+    pub max_rate_bps: u32,
+}
+
+/// Publish a rate formula configuration event.
+pub fn publish_rate_formula_config_event(env: &Env, event: RateFormulaConfigEvent) {
+    env.events().publish(
+        (symbol_short!("credit"), Symbol::new(env, "rate_form")),
+        event,
+    );
+}

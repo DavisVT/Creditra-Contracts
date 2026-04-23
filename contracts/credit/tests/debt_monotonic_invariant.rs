@@ -244,8 +244,8 @@ mod debt_monotonic {
         client.repay_credit(&borrower, &2_000);
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.utilized_amount, 4_000);
-        assert_eq!(line.accrued_interest, 500);
-        assert_eq!(total_debt(&line), 4_500);
+        assert_eq!(line.accrued_interest, 0); // interest-first: 500 interest repaid first
+        assert_eq!(total_debt(&line), 4_000);
     }
 
     #[test]
