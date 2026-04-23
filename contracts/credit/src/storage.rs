@@ -9,6 +9,8 @@ pub enum DataKey {
     /// Does not affect repayments. Distinct from per-line `Suspended` status.
     DrawsFrozen,
     MaxDrawAmount,
+    /// Per-borrower block flag; when `true`, draw_credit is rejected.
+    BlockedBorrower(Address),
 }
 
 pub fn admin_key(env: &Env) -> Symbol {

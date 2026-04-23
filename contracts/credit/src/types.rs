@@ -59,6 +59,10 @@ pub enum ContractError {
     DrawsFrozen = 15,
     /// The requested draw exceeds the configured per-transaction maximum.
     DrawExceedsMaxAmount = 16,
+    /// Borrower is blocked from drawing credit.
+    BorrowerBlocked = 17,
+    /// Admin acceptance attempted before the delay window has elapsed.
+    AdminAcceptTooEarly = 18,
 }
 
 /// Stored credit line data for a borrower.

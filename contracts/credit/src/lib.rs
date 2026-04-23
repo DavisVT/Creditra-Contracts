@@ -23,16 +23,19 @@ mod accrual;
 #[cfg(test)]
 mod accrual_tests;
 
-use crate::auth::require_admin_auth;
+use crate::auth::{require_admin, require_admin_auth};
 use crate::events::{
+    publish_admin_rotation_accepted, publish_admin_rotation_proposed,
     publish_credit_line_event, publish_drawn_event, publish_interest_accrued_event,
-    publish_repayment_event, CreditLineEvent, DrawnEvent, InterestAccruedEvent,
-    RepaymentEvent,
+    publish_repayment_event, AdminRotationAcceptedEvent, AdminRotationProposedEvent,
+    CreditLineEvent, DrawnEvent, InterestAccruedEvent, RepaymentEvent,
 };
 use crate::storage::{
-    admin_key, clear_reentrancy_guard, rate_cfg_key, set_reentrancy_guard, DataKey,
+    admin_key, clear_reentrancy_guard, is_borrower_blocked, proposed_admin_key,
+    proposed_at_key, rate_cfg_key, set_reentrancy_guard, DataKey,
 };
 use crate::types::{ContractError, CreditLineData, CreditStatus, RateChangeConfig};
+use crate::risk::{MAX_INTEREST_RATE_BPS, MAX_RISK_SCORE};
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env};
 
 // constants removed - imported from risk module
@@ -383,20 +386,6 @@ impl Credit {
             env.panic_with_error(ContractError::CreditLineClosed);
         }
 
-        // --- Accrue pending interest before applying repayment ---
-        // This ensures interest cannot be skipped or evaded through frequent repayments.
-        apply_pending_accrual(&env, &borrower);
-
-        // Reload credit line after potential accrual mutation
-        credit_line = env
-            .storage()
-            .persistent()
-            .get(&borrower)
-            .unwrap_or_else(|| {
-                clear_reentrancy_guard(&env);
-                env.panic_with_error(ContractError::CreditLineNotFound)
-            });
-
         // --- Compute effective repayment (cap at total owed) ---
         // Overpayments are capped to the total outstanding debt. No refund is issued.
         let effective_repay = if amount > credit_line.utilized_amount {
@@ -449,13 +438,15 @@ impl Credit {
         // --- Update state with "interest-first" policy ---
         // Repayment applies to interest first, then to principal.
         // utilized_amount includes both principal and accrued_interest.
-        let interest_to_pay = effective_repay.min(credit_line.accrued_interest);
-        credit_line.accrued_interest = credit_line.accrued_interest.checked_sub(interest_to_pay).unwrap_or(0);
-        
+        let interest_repaid = effective_repay.min(credit_line.accrued_interest);
+        let principal_repaid = effective_repay - interest_repaid;
+        credit_line.accrued_interest = credit_line.accrued_interest.checked_sub(interest_repaid).unwrap_or(0);
+
         let new_utilized = credit_line
             .utilized_amount
             .saturating_sub(effective_repay)
             .max(0);
+        credit_line.utilized_amount = new_utilized;
 
         env.storage().persistent().set(&borrower, &credit_line);
 
