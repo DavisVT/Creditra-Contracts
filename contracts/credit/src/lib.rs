@@ -273,6 +273,16 @@ impl Credit {
         credit_line.utilized_amount = updated_utilized;
         env.storage().persistent().set(&borrower, &credit_line);
         let timestamp = env.ledger().timestamp();
+        publish_interest_accrued_event(
+            &env,
+            InterestAccruedEvent {
+                borrower: borrower.clone(),
+                accrued_amount: 0,
+                total_accrued_interest: credit_line.accrued_interest,
+                new_utilized_amount: credit_line.utilized_amount,
+                timestamp,
+            },
+        );
         publish_drawn_event(
             &env,
             DrawnEvent {
@@ -409,6 +419,16 @@ impl Credit {
 
         // --- Emit event ---
         let timestamp = env.ledger().timestamp();
+        publish_interest_accrued_event(
+            &env,
+            InterestAccruedEvent {
+                borrower: borrower.clone(),
+                accrued_amount: 0,
+                total_accrued_interest: credit_line.accrued_interest,
+                new_utilized_amount: credit_line.utilized_amount,
+                timestamp,
+            },
+        );
         publish_repayment_event(
             &env,
             RepaymentEvent {

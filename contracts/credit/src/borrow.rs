@@ -98,6 +98,19 @@ pub fn repay_credit(env: Env, borrower: Address, amount: i128) {
         env.storage().persistent().set(&borrower, &credit_line);
 
         let timestamp = env.ledger().timestamp();
+
+        // Emit interest accrual event (currently 0 until full math is implemented)
+        publish_interest_accrued_event(
+            &env,
+            InterestAccruedEvent {
+                borrower: borrower.clone(),
+                accrued_amount: 0,
+                total_accrued_interest: credit_line.accrued_interest,
+                new_utilized_amount: credit_line.utilized_amount,
+                timestamp,
+            },
+        );
+
         publish_repayment_event(
             &env,
             RepaymentEvent {
