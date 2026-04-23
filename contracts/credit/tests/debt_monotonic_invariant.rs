@@ -53,13 +53,12 @@ mod debt_monotonic {
     fn debt_monotonic_across_full_lifecycle() {
         let env = Env::default();
         let (client, _contract_id, _admin, borrower) = setup_initialized_contract(&env);
-        let mut prev_debt: i128 = 0;
 
         // -- OPEN: debt starts at zero --
         client.open_credit_line(&borrower, &10_000, &500_u32, &70_u32);
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(total_debt(&line), 0);
-        prev_debt = total_debt(&line);
+        let mut prev_debt = total_debt(&line);
 
         // -- DRAW 1: debt increases --
         client.draw_credit(&borrower, &2_000);
@@ -106,7 +105,6 @@ mod debt_monotonic {
             prev_debt,
             total_debt(&line)
         );
-        prev_debt = total_debt(&line);
 
         // -- REPAY (allowed to decrease) --
         client.repay_credit(&borrower, &1_000);
@@ -116,7 +114,6 @@ mod debt_monotonic {
             2_500,
             "repay should reduce debt by repay amount"
         );
-        prev_debt = total_debt(&line);
 
         // -- SUSPEND: debt unchanged --
         client.update_risk_parameters(&borrower, &10_000, &600_u32, &75_u32);
@@ -132,13 +129,12 @@ mod debt_monotonic {
             prev_debt,
             total_debt(&line)
         );
-        prev_debt = total_debt(&line);
 
         // -- REPAY while suspended (allowed to decrease) --
         client.repay_credit(&borrower, &500);
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(total_debt(&line), 2_000);
-        prev_debt = total_debt(&line);
+        let prev_debt = total_debt(&line);
 
         // -- DEFAULT: debt unchanged --
         client.default_credit_line(&borrower);
@@ -150,13 +146,12 @@ mod debt_monotonic {
             prev_debt,
             total_debt(&line)
         );
-        prev_debt = total_debt(&line);
 
         // -- REPAY while defaulted (allowed to decrease) --
         client.repay_credit(&borrower, &500);
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(total_debt(&line), 1_500);
-        prev_debt = total_debt(&line);
+        let prev_debt = total_debt(&line);
 
         // -- REINSTATE: debt unchanged --
         client.reinstate_credit_line(&borrower);
@@ -186,8 +181,7 @@ mod debt_monotonic {
         // docs/interest-accrual.md: accrued interest is capitalized into the
         // accrued_interest field on each state-changing operation.
         env.as_contract(&contract_id, || {
-            let mut line: CreditLineData =
-                env.storage().persistent().get(&borrower).unwrap();
+            let mut line: CreditLineData = env.storage().persistent().get(&borrower).unwrap();
             line.accrued_interest = 250;
             line.last_accrual_ts = 1_000;
             env.storage().persistent().set(&borrower, &line);
@@ -231,8 +225,7 @@ mod debt_monotonic {
 
         // Simulate more interest accrual
         env.as_contract(&contract_id, || {
-            let mut line: CreditLineData =
-                env.storage().persistent().get(&borrower).unwrap();
+            let mut line: CreditLineData = env.storage().persistent().get(&borrower).unwrap();
             line.accrued_interest = 500;
             line.last_accrual_ts = 2_000;
             env.storage().persistent().set(&borrower, &line);
@@ -246,7 +239,6 @@ mod debt_monotonic {
             total_debt(&line)
         );
         assert_eq!(total_debt(&line), 6_500);
-        prev_debt = total_debt(&line);
 
         // -- REPAY: allowed to decrease --
         client.repay_credit(&borrower, &2_000);
