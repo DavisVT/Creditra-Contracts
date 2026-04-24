@@ -201,6 +201,7 @@ impl Credit {
     /// - [`ContractError::Overflow`] — utilized amount would overflow.
     /// - [`ContractError::DrawExceedsMaxAmount`] — amount exceeds per-tx draw cap.
     pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
+        assert_not_paused(&env);
         set_reentrancy_guard(&env);
         borrower.require_auth();
 
@@ -481,6 +482,7 @@ impl Credit {
     /// Set the maximum draw amount per transaction (admin only).
     /// Pass a positive value to cap draws. Unset by default (no limit).
     pub fn set_max_draw_amount(env: Env, amount: i128) {
+        assert_not_paused(&env);
         require_admin_auth(&env);
         if amount <= 0 {
             env.panic_with_error(ContractError::InvalidAmount);

@@ -49,6 +49,7 @@ pub enum CreditStatus {
 /// | 15   | `AdminAcceptTooEarly`          | Admin acceptance attempted before delay elapsed |
 /// | 16   | `BorrowerBlocked`              | Borrower is on the blocked list |
 /// | 17   | `DrawExceedsMaxAmount`         | Draw amount exceeds per-transaction cap |
+/// | 18   | `Paused`                       | Protocol is paused; operation blocked by circuit breaker |
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]

@@ -45,6 +45,7 @@ Rules enforced by CI (`tests/error_discriminants.rs`):
 | `15` | `AdminAcceptTooEarly`            | `accept_admin` was called before the `delay_seconds` window set in `propose_admin` has elapsed. | Wait until `env.ledger().timestamp() >= accept_after` and retry. |
 | `16` | `BorrowerBlocked`                | The borrower address is on the admin-managed block list; draws are disabled. | Contact the protocol admin to remove the block, or use a different borrower address. |
 | `17` | `DrawExceedsMaxAmount`           | The requested draw amount exceeds the per-transaction cap set via `set_max_draw_amount`. | Split the draw into smaller transactions or request a cap increase from the admin. |
+| `18` | `Paused`                         | The protocol is paused via the emergency circuit breaker; operation is blocked. | Wait for the admin to unpause the protocol via `set_protocol_paused(false)`. `repay_credit` remains active during a pause. |
 
 ---
 
@@ -116,6 +117,14 @@ affect repayments — a blocked borrower can still repay outstanding debt.
 **DrawExceedsMaxAmount (code 17)**  
 The per-transaction draw cap is a risk-management control, not a security boundary.
 It limits the blast radius of a compromised borrower key or a buggy integration.
+
+**Paused (code 18)**  
+The protocol pause is an emergency circuit breaker controlled by the admin. When
+activated, all state-mutating operations are blocked except `repay_credit`, which
+remains active to allow users to reduce their debt exposure even during an incident.
+The pause state is stored in instance storage and checked at the entry of every
+guarded function. Read-only operations (`get_credit_line`, `is_protocol_paused`, etc.)
+are never blocked.
 
 ### General Trust Model
 
