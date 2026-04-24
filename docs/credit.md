@@ -142,6 +142,16 @@ Draw funds from an **Active** credit line. Caller must be the borrower.
 
 Emits: `("credit", "drawn")` event.
 
+### `reverse_draw(env, borrower, amount, original_ts, reason_code)`
+Admin-only bounded reversal for erroneous draws.
+
+- Reversal is allowed only when `ledger_timestamp - original_ts <= 3600` seconds.
+- Reversal is validated against borrower-scoped draw audit data keyed by `(borrower, original_ts)`.
+- Supports partial reversal; total reversed amount cannot exceed the original drawn amount at that timestamp.
+- **Accounting-only behavior**: this call updates debt accounting (`utilized_amount`) and emits an audit event, but does not move tokens from borrower back to reserve.
+
+Emits: `("credit", "draw_rev")` event with `DrawReversedEvent` payload containing borrower, amount, original draw timestamp, reason code, actor, and post-reversal utilization.
+
 ### `repay_credit(env, borrower, amount)`
 Repay outstanding drawn funds.
 
@@ -297,6 +307,27 @@ Emits: `("credit", "reinstate")` event.
 ### `get_credit_line(env, borrower) -> Option<CreditLineData>`
 View function — returns credit line data or `None`.
 
+### `freeze_draws(env)`
+Freeze all `draw_credit` calls contract-wide (admin only).
+
+- Sets `DataKey::DrawsFrozen` to `true` in instance storage.
+- Does **not** mutate any borrower's `CreditStatus`; lines remain Active, Defaulted, etc.
+- Repayments are never blocked by this flag.
+- Idempotent: calling when already frozen still emits the event.
+
+Emits: `("credit", "drw_freeze")` with `DrawsFrozenEvent { frozen: true, timestamp, actor }`.
+
+### `unfreeze_draws(env)`
+Re-enable `draw_credit` after a global freeze (admin only).
+
+- Sets `DataKey::DrawsFrozen` to `false` in instance storage.
+- Idempotent: calling when already unfrozen still emits the event.
+
+Emits: `("credit", "drw_freeze")` with `DrawsFrozenEvent { frozen: false, timestamp, actor }`.
+
+### `is_draws_frozen(env) -> bool`
+Returns `true` when draws are globally frozen. Defaults to `false` when the key has never been set. No auth required.
+
 ---
 
 ## Overflow Policy
@@ -333,91 +364,25 @@ These tests validate behavior near `i128::MAX` and confirm overflow handling rem
 
 ## Error Codes
 
-The `Credit` contract uses stable `u32` discriminants for standardized error handling across the Rust and TypeScript SDK clients. Discriminants are **permanent** — they are never reordered or renumbered. See [`docs/errors.md`](errors.md) for the full reference including resolution guidance and security notes.
+The `Credit` contract uses standard `u32` discriminants for standardized error handling across the Rust and TypeScript SDK clients. Integrator clients can match these error codes to understand failure reasons.
 
-| Code | Variant                          | Description |
-|------|----------------------------------|-------------|
-| `1`  | `Unauthorized`                   | Caller is not authorized to perform this action. |
-| `2`  | `NotAdmin`                       | Caller does not have admin privileges. |
-| `3`  | `CreditLineNotFound`             | The specified credit line was not found. |
-| `4`  | `CreditLineClosed`               | Action cannot be performed because the credit line is closed. |
-| `5`  | `InvalidAmount`                  | The requested amount is invalid (e.g., zero or negative). |
-| `6`  | `OverLimit`                      | The requested draw exceeds the available credit limit. |
-| `7`  | `NegativeLimit`                  | The credit limit cannot be negative. |
-| `8`  | `RateTooHigh`                    | The interest rate change exceeds the maximum allowed delta. |
-| `9`  | `ScoreTooHigh`                   | The risk score is above the acceptable maximum threshold. |
-| `10` | `UtilizationNotZero`             | Action cannot be performed because the credit line utilization is not zero. |
-| `11` | `Reentrancy`                     | Reentrancy detected during cross-contract calls. |
-| `12` | `Overflow`                       | Math overflow occurred during calculation. |
-| `13` | `LimitDecreaseRequiresRepayment` | Credit limit decrease requires immediate repayment of excess amount. |
-| `14` | `AlreadyInitialized`             | Contract has already been initialized; `init` may only be called once. |
-| `15` | `AdminAcceptTooEarly`            | `accept_admin` called before the mandatory delay has elapsed. |
-| `16` | `BorrowerBlocked`                | Borrower is on the block list; draws are disabled. |
-| `17` | `DrawExceedsMaxAmount`           | Draw amount exceeds the per-transaction cap set by the admin. |
-| `18` | `Paused`                         | Protocol is paused; operation blocked by circuit breaker. |
-
----
-
-## Circuit Breaker (Emergency Pause)
-
-The contract includes an emergency pause mechanism to halt protocol operations in case of an exploit or critical bug.
-
-### Pause Control
-
-| Method | Caller | Description |
-|--------|--------|-------------|
-| `set_protocol_paused(paused: bool)` | Admin | Activate or deactivate the circuit breaker |
-| `is_protocol_paused() -> bool` | Anyone | Check if the protocol is currently paused |
-
-### Blocked Operations When Paused
-
-When `is_protocol_paused() == true`, the following operations revert with `ContractError::Paused`:
-
-- `open_credit_line`
-- `draw_credit`
-- `update_risk_parameters`
-- `suspend_credit_line`
-- `close_credit_line`
-- `default_credit_line`
-- `reinstate_credit_line`
-- `set_liquidity_token`
-- `set_liquidity_source`
-- `set_rate_change_limits`
-- `set_max_draw_amount`
-
-### Active Operations When Paused
-
-The following operations remain active during a pause:
-
-- `repay_credit` — users can always reduce their debt
-- `get_credit_line` — read-only
-- `is_protocol_paused` — read-only
-- `get_rate_change_limits` — read-only
-- `get_max_draw_amount` — read-only
-
-### Events
-
-| Event | Emitted When |
-|-------|--------------|
-| `("credit", "paused")` | Protocol is paused via `set_protocol_paused(true)` |
-| `("credit", "unpaused")` | Protocol is unpaused via `set_protocol_paused(false)` |
-
-Event payload: `ProtocolPausedEvent { admin, paused, timestamp }`
-
-### Threat Model
-
-**Trust assumptions:**
-- The admin key is secure and controlled by a trusted operator or multisig.
-- The pause mechanism is a last-resort incident response tool, not a routine operational control.
-
-**Failure modes:**
-- Admin key compromise: attacker can pause the protocol indefinitely, causing a denial-of-service.
-- Mitigation: use a multisig or hardware wallet for the admin key; monitor pause events.
-
-**Design rationale:**
-- `repay_credit` is explicitly whitelisted to ensure users can always reduce their debt exposure, even during an emergency. This prevents a paused protocol from trapping user funds.
-- The pause state is stored in instance storage for fast access (no persistent storage read on every call).
-- The guard function `assert_not_paused` is injected at the entry of every mutating operation, before any state reads or auth checks, to minimize compute overhead.
+| Error Code | Variant              | Description                                                                 |
+| ---------- | -------------------- | --------------------------------------------------------------------------- |
+| `1`        | `Unauthorized`       | Caller is not authorized to perform this action.                            |
+| `2`        | `NotAdmin`           | Caller does not have admin privileges.                                      |
+| `3`        | `CreditLineNotFound` | The specified credit line was not found.                                    |
+| `4`        | `CreditLineClosed`   | Action cannot be performed because the credit line is closed.               |
+| `5`        | `InvalidAmount`      | The requested amount is invalid (e.g., zero or negative).                   |
+| `6`        | `OverLimit`          | The requested draw exceeds the available credit limit.                      |
+| `7`        | `NegativeLimit`      | The credit limit cannot be negative.                                        |
+| `8`        | `RateTooHigh`        | The interest rate change exceeds the maximum allowed delta.                 |
+| `9`        | `ScoreTooHigh`       | The risk score is above the acceptable maximum threshold.                   |
+| `10`       | `UtilizationNotZero` | Action cannot be performed because the credit line utilization is not zero. |
+| `11`       | `Reentrancy`         | Reentrancy detected during cross-contract calls.                            |
+| `12`       | `Overflow`           | Math overflow occurred during calculation.                                  |
+| `13`       | `LimitDecreaseRequiresRepayment` | Credit limit decrease requires immediate repayment of excess amount. |
+| `14`       | `AlreadyInitialized` | Contract has already been initialized; `init` may only be called once.      |
+| `15`       | `DrawsFrozen` | All draws are globally frozen by admin for liquidity reserve operations.    |
 
 ---
 
@@ -427,6 +392,7 @@ Event payload: `ProtocolPausedEvent { admin, paused, timestamp }`
 |----------------------------|------------|-----------------------------|-----------|
 | `("credit", "opened")`     | `opened`   | `open_credit_line`          | New credit line created |
 | `("credit", "drawn")`      | `drawn`    | `draw_credit`               | Funds drawn |
+| `("credit", "draw_rev")`   | `draw_rev` | `reverse_draw`              | Admin accounting reversal for erroneous draw (audit trail with reason code) |
 | `("credit", "repay")`      | `repay`    | `repay_credit`              | Repayment made (includes interest/principal allocation) |
 | `("credit", "accrue")`     | `accrue`   | `apply_pending_accrual`     | Interest capitalized into debt |
 | `("credit", "suspend")`    | `suspend`  | `suspend_credit_line`       | Line suspended |
@@ -434,6 +400,7 @@ Event payload: `ProtocolPausedEvent { admin, paused, timestamp }`
 | `("credit", "default")`    | `default`  | `default_credit_line`       | Line defaulted |
 | `("credit", "reinstate")`  | `reinstate`| `reinstate_credit_line`     | Line reinstated |
 | `("credit", "risk_updated")`| `risk_updated` | `update_risk_parameters` | Risk parameters changed |
+| `("credit", "drw_freeze")` | `DrawsFrozenEvent` | `freeze_draws`, `unfreeze_draws` | Global draw freeze toggled |
 
 The contract also emits additive v2 event topics (for indexer analytics fields
 like actor/source/timestamp identifiers) while keeping v1 payloads stable. See
@@ -448,6 +415,7 @@ like actor/source/timestamp identifiers) while keeping v1 payloads stable. See
 | `init`                   | Deployer (once)       |
 | `open_credit_line`       | Backend / risk engine |
 | `draw_credit`            | Borrower              |
+| `reverse_draw`           | Admin                 |
 | `repay_credit`           | Borrower              |
 | `update_risk_parameters` | Admin / risk engine   |
 | `suspend_credit_line`    | Admin                 |
@@ -459,6 +427,9 @@ like actor/source/timestamp identifiers) while keeping v1 payloads stable. See
 | `set_rate_change_limits` | Admin                 |
 | `get_rate_change_limits` | Anyone (view)         |
 | `get_credit_line`        | Anyone (view)         |
+| `freeze_draws`           | Admin                 |
+| `unfreeze_draws`         | Admin                 |
+| `is_draws_frozen`        | Anyone (view)         |
 
 > Note: `open_credit_line` requires admin authorization (`require_auth`). The admin key is the backend/risk engine signer — borrowers cannot open their own credit lines.
 
@@ -992,6 +963,7 @@ these keys are lost. Production deployments should call
 | `DataKey::LiquiditySource` | `DataKey` | `Address` | `init`, `set_liquidity_source` | Reserve address. Defaults to contract address. |
 | `Symbol("reentrancy")` | `Symbol` | `bool` | `set_reentrancy_guard`, `clear_reentrancy_guard` | Defense-in-depth flag. Cleared on every code path. |
 | `Symbol("rate_cfg")` | `Symbol` | `RateChangeConfig` | `set_rate_change_limits` | Admin-configurable rate-change governance. |
+| `DataKey::DrawsFrozen` | `DataKey` | `bool` | `freeze_draws`, `unfreeze_draws` | Global emergency draw freeze. Absent = `false` (draws allowed). |
 
 **Why instance?** These are global singleton configuration values. There is
 exactly one admin, one liquidity token, one liquidity source, and one rate
@@ -1029,6 +1001,9 @@ Instance storage works correctly today because it is always cleared.
 7. **TTL management** — not yet implemented. Recommend adding
    `extend_ttl()` calls on instance (in `init` or a dedicated `bump` endpoint)
    and on persistent (on credit line access) before production deployment.
+8. **DrawsFrozen** — correctly on instance. Global singleton flag; absent key
+   is treated as `false` (draws allowed). Shares instance TTL — extend alongside
+   other instance keys.
 
 You can also run all workspace tests from the repository root with `cargo test`.
 
@@ -1055,8 +1030,9 @@ This section documents all contract errors and their exact error codes for consi
 | 11 | `Reentrancy` | Reentrancy detected during cross-contract calls | Reentrancy guard |
 | 12 | `Overflow` | Math overflow occurred during calculation | Arithmetic operations |
 | 13 | `LimitDecreaseRequiresRepayment` | Credit limit decrease requires immediate repayment of excess amount | Limit decrease validation |
-| 14 | `AlreadyInitialized` | Contract has already been initialized; `init` may only be called once | Initialization guard |
-| 15 | `BorrowerBlocked` | Borrower is blocked from drawing credit | Borrower blocklist enforcement |
+| 14 | `AlreadyInitialized` | Contract has already been initialized; `init` may only be called once | Second `init` call |
+| 15 | `DrawsFrozen` | All draws are globally frozen by admin for liquidity reserve operations | `draw_credit` when `DataKey::DrawsFrozen` is `true` |
+| 16 | `DrawExceedsMaxAmount` | The requested draw exceeds the configured per-transaction maximum | `draw_credit` when `DataKey::MaxDrawAmount` is set |
 
 ### Rate and Score Validation
 
