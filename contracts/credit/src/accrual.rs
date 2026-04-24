@@ -5,7 +5,7 @@ use crate::types::CreditLineData;
 use soroban_sdk::Env;
 
 /// Seconds in a non-leap year (365 days).
-const SECONDS_PER_YEAR: u64 = 31_536_000;
+pub(crate) const SECONDS_PER_YEAR: u64 = 31_536_000;
 
 /// Apply interest accrual to a credit line and return the updated line.
 ///
