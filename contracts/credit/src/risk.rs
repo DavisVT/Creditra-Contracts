@@ -3,7 +3,7 @@ use crate::events::{
     publish_rate_formula_config_event, publish_risk_parameters_updated,
     RateFormulaConfigEvent, RiskParametersUpdatedEvent,
 };
-use crate::storage::{rate_cfg_key, rate_formula_key};
+use crate::storage::{assert_not_paused, rate_cfg_key, rate_formula_key};
 use crate::types::{CreditLineData, RateChangeConfig, RateFormulaConfig};
 use soroban_sdk::{Address, Env};
 
@@ -57,6 +57,7 @@ pub fn compute_rate_from_score(cfg: &RateFormulaConfig, risk_score: u32) -> u32 
 /// * If credit line does not exist.
 /// * If validation fails (limit < utilization, score > 100, etc.).
 /// * If rate change exceeds configured limits.
+/// * If the protocol is paused.
 pub fn update_risk_parameters(
     env: Env,
     borrower: Address,
@@ -64,6 +65,7 @@ pub fn update_risk_parameters(
     interest_rate_bps: u32,
     risk_score: u32,
 ) {
+    assert_not_paused(&env);
     require_admin_auth(&env);
 
     let mut credit_line: CreditLineData = env

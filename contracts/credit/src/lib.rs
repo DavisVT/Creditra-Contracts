@@ -29,12 +29,15 @@ use soroban_sdk::{
 
 use crate::events::{
     publish_credit_line_event, publish_drawn_event, publish_interest_accrued_event,
-    publish_repayment_event, CreditLineEvent, DrawnEvent, InterestAccruedEvent,
-    RepaymentEvent,
+    publish_protocol_paused_event, publish_repayment_event, CreditLineEvent, DrawnEvent,
+    InterestAccruedEvent, ProtocolPausedEvent, RepaymentEvent,
 };
 use types::{ContractError, CreditLineData, CreditStatus, RateChangeConfig};
 use auth::require_admin_auth;
-use storage::{clear_reentrancy_guard, set_reentrancy_guard, rate_cfg_key, DataKey};
+use storage::{
+    assert_not_paused, clear_reentrancy_guard, is_paused, rate_cfg_key, set_paused,
+    set_reentrancy_guard, DataKey,
+};
 
 // constants removed - imported from risk module
 
@@ -144,6 +147,7 @@ impl Credit {
 
     /// @notice Sets the token contract used for reserve/liquidity checks and draw transfers.
     pub fn set_liquidity_token(env: Env, token_address: Address) {
+        assert_not_paused(&env);
         require_admin_auth(&env);
         env.storage()
             .instance()
@@ -152,6 +156,7 @@ impl Credit {
 
     /// @notice Sets the address that provides liquidity for draw operations.
     pub fn set_liquidity_source(env: Env, reserve_address: Address) {
+        assert_not_paused(&env);
         require_admin_auth(&env);
         env.storage()
             .instance()
@@ -165,6 +170,7 @@ impl Credit {
         interest_rate_bps: u32,
         risk_score: u32,
     ) {
+        assert_not_paused(&env);
         assert!(credit_limit > 0, "credit_limit must be greater than zero");
         if risk_score > MAX_RISK_SCORE {
             env.panic_with_error(ContractError::ScoreTooHigh);
@@ -226,6 +232,7 @@ impl Credit {
     /// @notice Draws credit by transferring liquidity tokens to the borrower.
     /// @dev Enforces status/limit/liquidity checks and uses a reentrancy guard.
     pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
+        assert_not_paused(&env);
         set_reentrancy_guard(&env);
         borrower.require_auth();
 
@@ -543,6 +550,7 @@ impl Credit {
         max_rate_change_bps: u32,
         rate_change_min_interval: u64,
     ) {
+        assert_not_paused(&env);
         require_admin_auth(&env);
         let cfg = RateChangeConfig {
             max_rate_change_bps,
@@ -559,6 +567,7 @@ impl Credit {
     /// Set the maximum draw amount per transaction (admin only).
     /// Pass a positive value to cap draws. Unset by default (no limit).
     pub fn set_max_draw_amount(env: Env, amount: i128) {
+        assert_not_paused(&env);
         require_admin_auth(&env);
         if amount <= 0 {
             env.panic_with_error(ContractError::InvalidAmount);
@@ -596,6 +605,52 @@ impl Credit {
     /// Get credit line data for a borrower (view function).
     pub fn get_credit_line(env: Env, borrower: Address) -> Option<CreditLineData> {
         env.storage().persistent().get(&borrower)
+    }
+
+    /// Pause the protocol (admin only). Blocks all mutating operations except repay_credit.
+    ///
+    /// # Circuit Breaker
+    /// When paused, the following operations are blocked:
+    /// - `open_credit_line`
+    /// - `draw_credit`
+    /// - `update_risk_parameters`
+    /// - `suspend_credit_line`
+    /// - `close_credit_line`
+    /// - `default_credit_line`
+    /// - `reinstate_credit_line`
+    /// - `set_liquidity_token`
+    /// - `set_liquidity_source`
+    /// - `set_rate_change_limits`
+    /// - `set_max_draw_amount`
+    ///
+    /// The following operations remain active:
+    /// - `repay_credit` (users can always reduce debt)
+    /// - `get_credit_line` (read-only)
+    /// - `is_paused` (read-only)
+    /// - `get_rate_change_limits` (read-only)
+    /// - `get_max_draw_amount` (read-only)
+    ///
+    /// # Errors
+    /// Panics if caller is not the admin.
+    ///
+    /// # Events
+    /// Emits `("credit", "paused")` with `ProtocolPausedEvent`.
+    pub fn set_protocol_paused(env: Env, paused: bool) {
+        let admin = require_admin_auth(&env);
+        set_paused(&env, paused);
+        publish_protocol_paused_event(
+            &env,
+            ProtocolPausedEvent {
+                admin,
+                paused,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Check if the protocol is paused (view function).
+    pub fn is_protocol_paused(env: Env) -> bool {
+        is_paused(&env)
     }
 }
 

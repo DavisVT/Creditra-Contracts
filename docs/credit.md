@@ -354,6 +354,70 @@ The `Credit` contract uses stable `u32` discriminants for standardized error han
 | `15` | `AdminAcceptTooEarly`            | `accept_admin` called before the mandatory delay has elapsed. |
 | `16` | `BorrowerBlocked`                | Borrower is on the block list; draws are disabled. |
 | `17` | `DrawExceedsMaxAmount`           | Draw amount exceeds the per-transaction cap set by the admin. |
+| `18` | `Paused`                         | Protocol is paused; operation blocked by circuit breaker. |
+
+---
+
+## Circuit Breaker (Emergency Pause)
+
+The contract includes an emergency pause mechanism to halt protocol operations in case of an exploit or critical bug.
+
+### Pause Control
+
+| Method | Caller | Description |
+|--------|--------|-------------|
+| `set_protocol_paused(paused: bool)` | Admin | Activate or deactivate the circuit breaker |
+| `is_protocol_paused() -> bool` | Anyone | Check if the protocol is currently paused |
+
+### Blocked Operations When Paused
+
+When `is_protocol_paused() == true`, the following operations revert with `ContractError::Paused`:
+
+- `open_credit_line`
+- `draw_credit`
+- `update_risk_parameters`
+- `suspend_credit_line`
+- `close_credit_line`
+- `default_credit_line`
+- `reinstate_credit_line`
+- `set_liquidity_token`
+- `set_liquidity_source`
+- `set_rate_change_limits`
+- `set_max_draw_amount`
+
+### Active Operations When Paused
+
+The following operations remain active during a pause:
+
+- `repay_credit` — users can always reduce their debt
+- `get_credit_line` — read-only
+- `is_protocol_paused` — read-only
+- `get_rate_change_limits` — read-only
+- `get_max_draw_amount` — read-only
+
+### Events
+
+| Event | Emitted When |
+|-------|--------------|
+| `("credit", "paused")` | Protocol is paused via `set_protocol_paused(true)` |
+| `("credit", "unpaused")` | Protocol is unpaused via `set_protocol_paused(false)` |
+
+Event payload: `ProtocolPausedEvent { admin, paused, timestamp }`
+
+### Threat Model
+
+**Trust assumptions:**
+- The admin key is secure and controlled by a trusted operator or multisig.
+- The pause mechanism is a last-resort incident response tool, not a routine operational control.
+
+**Failure modes:**
+- Admin key compromise: attacker can pause the protocol indefinitely, causing a denial-of-service.
+- Mitigation: use a multisig or hardware wallet for the admin key; monitor pause events.
+
+**Design rationale:**
+- `repay_credit` is explicitly whitelisted to ensure users can always reduce their debt exposure, even during an emergency. This prevents a paused protocol from trapping user funds.
+- The pause state is stored in instance storage for fast access (no persistent storage read on every call).
+- The guard function `assert_not_paused` is injected at the entry of every mutating operation, before any state reads or auth checks, to minimize compute overhead.
 
 ---
 

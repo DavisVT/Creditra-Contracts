@@ -232,3 +232,26 @@ pub fn publish_borrower_blocked_event(env: &Env, event: BorrowerBlockedEvent) {
     env.events()
         .publish((symbol_short!("credit"), topic), event);
 }
+
+/// Event emitted when the protocol pause state changes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolPausedEvent {
+    /// Admin who triggered the pause/unpause.
+    pub admin: Address,
+    /// New pause state (true = paused, false = unpaused).
+    pub paused: bool,
+    /// Ledger timestamp when the state changed.
+    pub timestamp: u64,
+}
+
+/// Publish a protocol paused/unpaused event.
+pub fn publish_protocol_paused_event(env: &Env, event: ProtocolPausedEvent) {
+    let topic = if event.paused {
+        symbol_short!("paused")
+    } else {
+        symbol_short!("unpaused")
+    };
+    env.events()
+        .publish((symbol_short!("credit"), topic), event);
+}
