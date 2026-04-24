@@ -1383,7 +1383,7 @@ mod test {
 
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.accrued_interest, 100); // 200 - 100
-        assert_eq!(line.utilized_amount, 500); // total unchanged since interest only
+        assert_eq!(line.utilized_amount, 400); // 500 - 100 (interest repaid reduces utilized_amount)
     }
 
     #[test]
@@ -1471,8 +1471,10 @@ mod test {
 
     #[test]
     fn repay_accrual_initializes_checkpoint_without_charging() {
+        use soroban_sdk::testutils::Ledger;
         let env = Env::default();
         env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
         let borrower = Address::generate(&env);
         let (client, token, contract_id, _admin) = setup(&env, &borrower, 1_000, 1_000, 400);
 
@@ -1498,6 +1500,7 @@ mod test {
         use soroban_sdk::testutils::Ledger;
         let env = Env::default();
         env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
         let borrower = Address::generate(&env);
         let (client, token, contract_id, _admin) = setup(&env, &borrower, 10_000, 10_000, 1_000);
 
