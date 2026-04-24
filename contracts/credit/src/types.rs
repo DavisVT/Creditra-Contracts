@@ -130,3 +130,15 @@ pub struct RateFormulaConfig {
     /// Maximum allowed computed rate (ceiling), must be <= 10_000.
     pub max_rate_bps: u32,
 }
+
+/// Structured representation of the contract's API version (semver).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContractVersion {
+    /// Incremented on breaking ABI or storage layout changes.
+    pub major: u32,
+    /// Incremented on backward-compatible feature additions.
+    pub minor: u32,
+    /// Incremented on backward-compatible bug fixes.
+    pub patch: u32,
+}

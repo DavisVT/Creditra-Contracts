@@ -38,7 +38,9 @@ use crate::storage::{
 use crate::types::{ContractError, CreditLineData, CreditStatus, RateChangeConfig};
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env};
 
-// constants removed - imported from risk module
+/// Contract API version (major, minor, patch).
+/// Increment major on breaking ABI/storage changes, minor on additive features, patch on fixes.
+pub const CONTRACT_API_VERSION: (u32, u32, u32) = (1, 0, 0);
 
 /// Seconds in a standard year (365 days).
 #[allow(dead_code)]

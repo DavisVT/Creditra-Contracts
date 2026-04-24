@@ -244,6 +244,22 @@ pub struct BorrowerBlockedEvent {
     pub blocked: bool,
 }
 
+/// Publish an admin rotation proposed event.
+pub fn publish_admin_rotation_proposed(env: &Env, event: AdminRotationProposedEvent) {
+    env.events().publish(
+        (symbol_short!("credit"), Symbol::new(env, "admin_prop")),
+        event,
+    );
+}
+
+/// Publish an admin rotation accepted event.
+pub fn publish_admin_rotation_accepted(env: &Env, event: AdminRotationAcceptedEvent) {
+    env.events().publish(
+        (symbol_short!("credit"), Symbol::new(env, "admin_acc")),
+        event,
+    );
+}
+
 /// Publish a borrower blocked/unblocked event.
 #[allow(dead_code)]
 pub fn publish_borrower_blocked_event(env: &Env, event: BorrowerBlockedEvent) {
