@@ -1480,9 +1480,9 @@ mod test {
         let borrower = Address::generate(&env);
         let (client, token, contract_id, _admin) = setup(&env, &borrower, 1_000, 1_000, 400);
 
-        // last_accrual_ts should be 0 initially
+        // After draw_credit, apply_accrual sets the checkpoint to the current timestamp
         let line_before = client.get_credit_line(&borrower).unwrap();
-        assert_eq!(line_before.last_accrual_ts, 0);
+        assert_eq!(line_before.last_accrual_ts, 1_000); // set during draw_credit
         assert_eq!(line_before.accrued_interest, 0);
 
         StellarAssetClient::new(&env, &token).mint(&borrower, &100);
@@ -1491,8 +1491,8 @@ mod test {
         client.repay_credit(&borrower, &100);
 
         let line_after = client.get_credit_line(&borrower).unwrap();
-        // Checkpoint should be set but no retroactive interest charged
-        assert!(line_after.last_accrual_ts > 0);
+        // Checkpoint remains set, no interest charged (same timestamp)
+        assert_eq!(line_after.last_accrual_ts, 1_000);
         assert_eq!(line_after.accrued_interest, 0);
         assert_eq!(line_after.utilized_amount, 300);
     }
